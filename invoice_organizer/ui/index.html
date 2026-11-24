@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>科研人员发票整理工具</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">票</span>
+        <div>
+          <h1>科研人员发票整理工具</h1>
+          <p class="subtitle">本地整理 · 计划确认 · 可回溯可回滚</p>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <label class="role-label">本地角色
+          <select id="roleSelect" title="演示级角色切换">
+            <option value="ADMIN">管理员</option>
+            <option value="OPERATOR" selected>操作员</option>
+            <option value="READER">只读</option>
+          </select>
+        </label>
+        <span id="batchBadge" class="badge">未启动</span>
+      </div>
+    </header>
+
+    <nav class="sidebar">
+      <button class="nav-btn active" data-view="settings">① 设置</button>
+      <button class="nav-btn" data-view="import">② 导入与监控</button>
+      <button class="nav-btn" data-view="preview">③ 预览与确认</button>
+      <button class="nav-btn" data-view="batches">④ 批次历史</button>
+      <button class="nav-btn" data-view="review">⑤ 待复核与导出</button>
+      <div class="sidebar-foot">
+        <p>边界声明</p>
+        <small>本工具只做信息提取与整理，不判断真伪、不做合规结论、不认定重复报销。所有结果为整理辅助建议，最终判断权在人工。</small>
+      </div>
+    </nav>
+
+    <main class="content">
+      <!-- 视图 1：设置 -->
+      <section class="view active" id="view-settings">
+        <h2>配置设置</h2>
+        <p class="hint">输入目录与输出目录不得互相包含；目录/命名模板仅支持八字段与 batchId 占位符。</p>
+        <div class="card">
+          <label>配置 JSON</label>
+          <textarea id="configJson" spellcheck="false" rows="18"></textarea>
+          <div class="row">
+            <button id="loadConfigBtn" class="btn">加载配置</button>
+            <button id="saveConfigBtn" class="btn primary">保存配置（版本+1）</button>
+            <span id="configMsg" class="msg"></span>
+          </div>
+        </div>
+      </section>
+
+      <!-- 视图 2：导入与监控 -->
+      <section class="view" id="view-import">
+        <h2>导入与监控</h2>
+        <p class="hint">保存配置后启动监控，把发票文件（PDF / OFD / 图片）投放到 watch.path 目录，写稳后自动入队。</p>
+        <div class="card">
+          <div class="row">
+            <label>档案 ID <input id="profileId" value="default"></label>
+            <button id="startBtn" class="btn primary">启动监控</button>
+          </div>
+          <div id="watchInfo" class="info-box">尚未启动</div>
+        </div>
+      </section>
+
+      <!-- 视图 3：预览与确认 -->
+      <section class="view" id="view-preview">
+        <h2>计划预览与人工确认</h2>
+        <p class="hint">核对旧路径 → 新路径、命中规则、冲突与缺字段；确认后方可执行归档。</p>
+        <div class="row">
+          <label>批次 ID <input id="previewBatchId" placeholder="BYYYYMMDD-HHMMSS-XXXX"></label>
+          <button id="loadPlanBtn" class="btn">加载计划</button>
+          <button id="confirmBtn" class="btn primary">确认计划</button>
+        </div>
+        <div id="planList" class="list"></div>
+      </section>
+
+      <!-- 视图 4：批次历史 -->
+      <section class="view" id="view-batches">
+        <h2>批次历史</h2>
+        <div class="row"><button id="refreshBatchesBtn" class="btn">刷新</button></div>
+        <div id="batchList" class="list"></div>
+      </section>
+
+      <!-- 视图 5：待复核与导出 -->
+      <section class="view" id="view-review">
+        <h2>待复核与导出</h2>
+        <div class="row">
+          <label>批次 ID <input id="reviewBatchId" placeholder="批次 ID"></label>
+          <button id="loadReviewBtn" class="btn">加载待复核</button>
+          <button id="execBtn" class="btn warn">执行归档</button>
+          <button id="exportBtn" class="btn">导出台账</button>
+        </div>
+        <div id="reviewList" class="list"></div>
+        <div id="exportMsg" class="msg"></div>
+      </section>
+    </main>
+
+    <div id="toast" class="toast"></div>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>

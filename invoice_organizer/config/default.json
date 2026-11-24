@@ -1,0 +1,70 @@
+{
+  "profileId": "default",
+  "version": 1,
+  "schemaVersion": 1,
+  "watch": {
+    "path": "data/inbox",
+    "recursive": true,
+    "settleSeconds": 1.0,
+    "maxSettleWait": 60
+  },
+  "output": {
+    "archiveRoot": "data/archive",
+    "quarantine": "data/quarantine"
+  },
+  "organizeBy": "invoiceNo",
+  "categories": [
+    {
+      "id": "travel",
+      "label": "差旅",
+      "priority": 10,
+      "match": { "field": "itemName", "contains": "交通" }
+    },
+    {
+      "id": "office",
+      "label": "办公",
+      "priority": 20,
+      "match": { "field": "itemName", "contains": "办公" }
+    }
+  ],
+  "fields": [
+    "invoiceNo",
+    "issueDate",
+    "buyerName",
+    "buyerTaxId",
+    "sellerName",
+    "sellerTaxId",
+    "itemName",
+    "amountCent"
+  ],
+  "amountSource": "totalExclTax",
+  "directoryTemplate": "{issueDate}/{sellerName}",
+  "filenameTemplate": "{issueDate}_{sellerName}_{amountCent}_{invoiceNo}",
+  "export": {
+    "template": "default",
+    "columns": [
+      "invoiceNo",
+      "issueDate",
+      "buyerName",
+      "buyerTaxId",
+      "sellerName",
+      "sellerTaxId",
+      "itemName",
+      "amountCent",
+      "categoryLabel",
+      "archivedPath",
+      "batchId",
+      "profileVersion",
+      "fieldStatus"
+    ],
+    "encoding": "UTF-8-BOM",
+    "format": "xlsx"
+  },
+  "execution": {
+    "previewRequired": true,
+    "preserveSource": true,
+    "dedupe": true,
+    "ocrRetry": 2,
+    "ocrTimeoutSec": 20
+  }
+}
