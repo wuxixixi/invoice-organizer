@@ -26,6 +26,7 @@ class BatchSummary:
     successCount: int = 0
     failedCount: int = 0
     conflictCount: int = 0
+    duplicateCount: int = 0
     reviewCount: int = 0
 
     def to_dict(self) -> dict[str, Any]:
@@ -33,7 +34,7 @@ class BatchSummary:
         return {
             "inputCount": self.inputCount, "successCount": self.successCount,
             "failedCount": self.failedCount, "conflictCount": self.conflictCount,
-            "reviewCount": self.reviewCount,
+            "duplicateCount": self.duplicateCount, "reviewCount": self.reviewCount,
         }
 
     @classmethod
@@ -45,6 +46,7 @@ class BatchSummary:
             successCount=int(data.get("successCount", 0) or 0),
             failedCount=int(data.get("failedCount", 0) or 0),
             conflictCount=int(data.get("conflictCount", 0) or 0),
+            duplicateCount=int(data.get("duplicateCount", 0) or 0),
             reviewCount=int(data.get("reviewCount", 0) or 0),
         )
 

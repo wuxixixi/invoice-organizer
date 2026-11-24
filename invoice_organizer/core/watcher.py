@@ -110,6 +110,7 @@ class FileWatcher:
     def stop(self) -> None:
         """停止监控与 watchdog observer。"""
         self._stop_event.set()
+        self._pending.clear()
         observer = getattr(self, "_observer", None)
         if observer is not None:
             try:
@@ -146,6 +147,8 @@ class FileWatcher:
                 continue
             self._pending[key] = time.monotonic()
         for key in list(self._pending.keys()):
+            if self._stop_event.is_set():
+                return
             started = self._pending[key]
             # 写稳超时 → E101，移出 pending
             if time.monotonic() - started > max_wait:
@@ -228,6 +231,8 @@ class FileWatcher:
 
     def _enqueue(self, path: str) -> None:
         """计算哈希，生成 StableFile 入队并回调。"""
+        if self._stop_event.is_set():
+            return
         try:
             stat = Path(path).stat()
             stable = StableFile(
@@ -236,6 +241,8 @@ class FileWatcher:
             )
         except OSError as exc:
             self._logger.warning("无法计算写稳文件哈希：%s - %s", path, exc)
+            return
+        if self._stop_event.is_set():
             return
         self.queue.put(stable)
         if self._callback:

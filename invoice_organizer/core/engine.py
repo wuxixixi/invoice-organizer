@@ -18,7 +18,9 @@ from invoice_organizer import ERROR_CODES
 from invoice_organizer.config.loader import ProfileLoader
 from invoice_organizer.config.schema import ProfileConfig
 from invoice_organizer.core.archiver import Archiver, ArchiveResult
-from invoice_organizer.core.dedupe import DedupeResult, DedupeService
+from invoice_organizer.core.dedupe import (KIND_CONFLICT_SAME_NO,
+                                           KIND_DUP_SAME_HASH, DedupeResult,
+                                           DedupeService)
 from invoice_organizer.core.exporter import ExportEngine
 from invoice_organizer.core.fields import FieldExtractor
 from invoice_organizer.core.llm_client import LlmClient
@@ -142,11 +144,12 @@ class OrganizeEngine:
         self._role = Role.OPERATOR
 
     # ---------------------------------------------------------------- 启动
-    def start(self, profileId: str = "") -> str:
+    def start(self, profileId: str = "", start_watcher: bool = True) -> str:
         """启动监控并创建运行批次，返回批次 ID。
 
         Args:
             profileId: 档案 ID；为空表示使用当前配置。
+            start_watcher: False 时只创建批次、不启动后台监控（受控注入场景）。
         """
         if profileId and self.loader and profileId != self.config.profileId:
             self.config = self.loader.load(profileId)
@@ -167,7 +170,8 @@ class OrganizeEngine:
         self.db.save_batch(batch)
         self._current_batch_id = batch.id
         self._batch_invoices[batch.id] = []
-        self.watcher.start(callback=self.on_stable_file)
+        if start_watcher:
+            self.watcher.start(callback=self.on_stable_file)
         self._logger.info("引擎启动，批次 %s", batch.id)
         return batch.id
 
@@ -242,6 +246,7 @@ class OrganizeEngine:
         setattr(invoice, "batch_id", batch_id)
         invoice.status = "PREVIEW"
         self.db.save_invoice(invoice)
+        self.db.insert_file(file.sha256, file.path, file.size, file.mtimeNs)
         self._batch_invoices[batch_id].append(invoice)
 
         # 待复核
@@ -381,9 +386,12 @@ class OrganizeEngine:
         review_path = self.exporter.export_review_list(reviews, batchId)
 
         batch = self.db.get_batch(batchId)
+        conflicts = self.db.list_conflicts(batchId)
         summary = BatchSummary(
             inputCount=len(plan.items), successCount=success, failedCount=failed,
-            conflictCount=len(self.db.list_conflicts(batchId)), reviewCount=len(reviews),
+            conflictCount=sum(1 for c in conflicts if c.type == KIND_CONFLICT_SAME_NO),
+            duplicateCount=sum(1 for c in conflicts if c.type == KIND_DUP_SAME_HASH),
+            reviewCount=len(reviews),
         )
         report = BatchReport(
             batchId=batchId, summary=summary, configVersion=self.config.version,

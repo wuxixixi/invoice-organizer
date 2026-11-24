@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 from pathlib import Path
 
 _LOGGER_NAME = "invoice_organizer"
@@ -29,7 +30,7 @@ def configure_logging(data_dir: str | Path | None = None,
 
     formatter = logging.Formatter(_FORMAT)
 
-    console = logging.StreamHandler()
+    console = logging.StreamHandler(sys.stdout)
     console.setLevel(level)
     console.setFormatter(formatter)
     logger.addHandler(console)
