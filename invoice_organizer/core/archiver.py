@@ -95,10 +95,10 @@ class Archiver:
         try:
             # 原件存在性与只读检查（绝不删除/修改原件）
             if not src or not Path(src).is_file():
-                result.errorCode = ERROR_CODES["E102"]
+                result.errorCode = "E102"
                 return result
             if Path(src).is_symlink():
-                result.errorCode = ERROR_CODES["E501"]
+                result.errorCode = "E501"
                 return result
             result.sourceSha256 = HashUtil.file_sha256(src)
 
@@ -108,7 +108,7 @@ class Archiver:
                 dest_str = self.guard.resolve_inside(self.guard.archiveRoot,
                                                      os.path.join(self.guard.archiveRoot, rel))
             except PathViolation:
-                result.errorCode = ERROR_CODES["E501"]
+                result.errorCode = "E501"
                 return result
 
             # 不覆盖重名
@@ -121,26 +121,26 @@ class Archiver:
             # 原子写：临时文件（同目录）→ os.replace
             written = self._write_atomic(src, str(dest))
             if not written:
-                result.errorCode = ERROR_CODES["E602"]
+                result.errorCode = "E602"
                 return result
             self.createdPaths.append(str(dest))
             result.archivedPath = str(dest)
 
             # 写后哈希复核
             if not self.verify(result.sourceSha256, str(dest)):
-                result.errorCode = ERROR_CODES["E603"]
+                result.errorCode = "E603"
                 result.sha256 = HashUtil.try_file_sha256(dest)
                 return result
             result.sha256 = HashUtil.file_sha256(dest)
             result.verified = True
             return result
         except OSError as exc:
-            result.errorCode = ERROR_CODES["E601"]
-            self._logger.warning("归档写入失败：%s", exc)
+            result.errorCode = "E601"
+            self._logger.warning("%s 归档写入失败：%s", ERROR_CODES["E601"], exc)
             return result
         except Exception as exc:  # noqa: BLE001 - 单文件异常隔离
-            result.errorCode = ERROR_CODES["E602"]
-            self._logger.exception("归档异常：%s", exc)
+            result.errorCode = "E602"
+            self._logger.exception("%s 归档异常：%s", ERROR_CODES["E602"], exc)
             return result
 
     def _write_atomic(self, src: str, dest: str) -> bool:

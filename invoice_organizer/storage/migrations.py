@@ -36,6 +36,8 @@ V1_STATEMENTS: tuple[str, ...] = (
         amount_cent INTEGER NOT NULL DEFAULT 0,
         category_label TEXT NOT NULL DEFAULT '',
         category_rule_id TEXT NOT NULL DEFAULT '',
+        items_json TEXT NOT NULL DEFAULT '[]',
+        sources_json TEXT NOT NULL DEFAULT '[]',
         status TEXT NOT NULL DEFAULT 'NEW'
     )
     """,
@@ -67,6 +69,7 @@ V1_STATEMENTS: tuple[str, ...] = (
         id TEXT PRIMARY KEY,
         batch_id TEXT NOT NULL DEFAULT '',
         status TEXT NOT NULL DEFAULT 'DRAFT',
+        profile_version INTEGER NOT NULL DEFAULT 1,
         created_at TEXT NOT NULL DEFAULT ''
     )
     """,

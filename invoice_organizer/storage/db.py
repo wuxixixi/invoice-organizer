@@ -18,7 +18,7 @@ from typing import Any, Iterator
 
 from invoice_organizer.models.audit import AuditEvent
 from invoice_organizer.models.batch import Batch, BatchReport
-from invoice_organizer.models.invoice import InvoiceRecord
+from invoice_organizer.models.invoice import FieldSlot, InvoiceRecord
 from invoice_organizer.models.plan import Conflict, Plan, PlanItem
 from invoice_organizer.storage.migrations import Migrations
 
@@ -26,6 +26,87 @@ from invoice_organizer.storage.migrations import Migrations
 def _new_id(prefix: str) -> str:
     """生成带前缀的唯一 ID。"""
     return f"{prefix}{uuid.uuid4().hex[:16]}"
+
+
+# ---------------------------------------------------------------------------
+# SQLite 列为 snake_case，领域模型 from_dict() 使用 camelCase。
+# 以下映射函数集中完成 row→模型 转换，避免读取后字段退化为默认值。
+# ---------------------------------------------------------------------------
+def _invoice_from_row(conn: sqlite3.Connection, row: sqlite3.Row) -> InvoiceRecord:
+    """把 invoices 行映射为 InvoiceRecord，并加载其字段槽位。"""
+    data = dict(row)
+    mapped: dict[str, Any] = {
+        "id": data.get("id", ""),
+        "invoiceNo": data.get("invoice_no", "") or "",
+        "issueDate": data.get("issue_date", "") or "",
+        "amountCent": data.get("amount_cent", 0) or 0,
+        "categoryLabel": data.get("category_label", "") or "",
+        "categoryRuleId": data.get("category_rule_id") or None,
+        "status": data.get("status", "NEW") or "NEW",
+        "fields": [],
+        "items": [],
+        "sources": [],
+    }
+    inv = InvoiceRecord.from_dict(mapped)
+    # batch_id 不是 dataclass 声明字段，save_invoice 通过 getattr 读取，保留该动态属性
+    setattr(inv, "batch_id", data.get("batch_id", "") or "")
+    slots = conn.execute(
+        "SELECT * FROM field_slots WHERE invoice_id=? ORDER BY rowid", (inv.id,)
+    ).fetchall()
+    inv.fields = [
+        FieldSlot.from_dict({
+            "key": s["field_key"],
+            "value": s["value"],
+            "confidence": s["confidence"],
+            "evidence": json.loads(s["evidence_json"] or "{}"),
+            "verified": bool(s["verified"]),
+        })
+        for s in slots
+    ]
+    # 行项目与来源引用以 JSON 列持久化，读取时还原
+    from invoice_organizer.models.invoice import ItemLine, SourceRef
+
+    try:
+        inv.items = [ItemLine(
+            name=str(d.get("name", "")), spec=str(d.get("spec", "")),
+            quantity=int(d.get("quantity", 1) or 1),
+            amountCent=int(d.get("amountCent", 0) or 0),
+        ) for d in json.loads(data.get("items_json") or "[]")]
+        inv.sources = [SourceRef.from_dict(d)
+                       for d in json.loads(data.get("sources_json") or "[]")]
+    except (ValueError, TypeError):  # 旧库/损坏 JSON 时降级为空，不阻断读取
+        inv.items = []
+        inv.sources = []
+    return inv
+
+
+def _batch_from_row(row: sqlite3.Row) -> Batch:
+    """把 batches 行映射为 Batch（含配置快照/统计/报告）。"""
+    data = dict(row)
+    report_raw = data.get("report_json") or ""
+    return Batch.from_dict({
+        "id": data.get("id", ""),
+        "profileVersion": data.get("profile_version", 1) or 1,
+        "configSnapshot": data.get("config_snapshot", "") or "",
+        "status": data.get("status", "RUNNING") or "RUNNING",
+        "summary": json.loads(data.get("summary_json") or "{}"),
+        "startedAt": data.get("started_at", "") or "",
+        "endedAt": data.get("ended_at", "") or "",
+        "report": json.loads(report_raw) if report_raw else None,
+    })
+
+
+def _plan_from_row(row: sqlite3.Row) -> Plan:
+    """把 plans 行映射为 Plan（计划项在 get_plan 中单独加载）。"""
+    data = dict(row)
+    return Plan.from_dict({
+        "id": data.get("id", ""),
+        "batchId": data.get("batch_id", "") or "",
+        "status": data.get("status", "DRAFT") or "DRAFT",
+        "profileVersion": data.get("profile_version", 1) or 1,
+        "createdAt": data.get("created_at", "") or "",
+        "items": [],
+    })
 
 
 class Database:
@@ -123,14 +204,21 @@ class Database:
         conn = self.connect()
         conn.execute(
             """INSERT INTO invoices(id,batch_id,invoice_no,issue_date,amount_cent,
-                                     category_label,category_rule_id,status)
-               VALUES(?,?,?,?,?,?,?,?)
+                                     category_label,category_rule_id,items_json,
+                                     sources_json,status)
+               VALUES(?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(id) DO UPDATE SET
                  invoice_no=excluded.invoice_no, issue_date=excluded.issue_date,
                  amount_cent=excluded.amount_cent, category_label=excluded.category_label,
-                 category_rule_id=excluded.category_rule_id, status=excluded.status""",
+                 category_rule_id=excluded.category_rule_id,
+                 items_json=excluded.items_json, sources_json=excluded.sources_json,
+                 status=excluded.status""",
             (inv.id, getattr(inv, "batch_id", "") or "", inv.invoiceNo, inv.issueDate,
-             inv.amountCent, inv.categoryLabel, inv.categoryRuleId or "", inv.status),
+             inv.amountCent, inv.categoryLabel, inv.categoryRuleId or "",
+             json.dumps([{"name": i.name, "spec": i.spec, "quantity": i.quantity,
+                          "amountCent": i.amountCent} for i in inv.items], ensure_ascii=False),
+             json.dumps([s.to_dict() for s in inv.sources], ensure_ascii=False),
+             inv.status),
         )
         conn.execute("DELETE FROM field_slots WHERE invoice_id=?", (inv.id,))
         for slot in inv.fields:
@@ -148,22 +236,10 @@ class Database:
         """按 ID 读取发票（含字段槽位）。"""
         conn = self.connect()
         row = conn.execute("SELECT * FROM invoices WHERE id=?", (invoice_id,)).fetchone()
-        if not row:
-            return None
-        inv = InvoiceRecord.from_dict(dict(row))
-        slots = conn.execute(
-            "SELECT * FROM field_slots WHERE invoice_id=? ORDER BY rowid", (invoice_id,)
-        ).fetchall()
-        from invoice_organizer.models.invoice import FieldSlot
-        inv.fields = [FieldSlot.from_dict({
-            "key": s["field_key"], "value": s["value"], "confidence": s["confidence"],
-            "evidence": json.loads(s["evidence_json"] or "{}"),
-            "verified": bool(s["verified"]),
-        }) for s in slots]
-        return inv
+        return _invoice_from_row(conn, row) if row else None
 
     def list_invoices(self, batch_id: str = "") -> list[InvoiceRecord]:
-        """列出发票（可按批次过滤）。"""
+        """列出发票（可按批次过滤）；每条均加载字段槽位。"""
         conn = self.connect()
         if batch_id:
             rows = conn.execute(
@@ -171,19 +247,15 @@ class Database:
             ).fetchall()
         else:
             rows = conn.execute("SELECT * FROM invoices ORDER BY rowid").fetchall()
-        result: list[InvoiceRecord] = []
-        for row in rows:
-            data = dict(row)
-            data["fields"] = []
-            result.append(InvoiceRecord.from_dict(data))
-        return result
+        return [_invoice_from_row(conn, row) for row in rows]
 
     def find_invoice_by_no(self, invoice_no: str) -> InvoiceRecord | None:
         """按票号查找发票（冲突判定用）。"""
-        row = self.connect().execute(
+        conn = self.connect()
+        row = conn.execute(
             "SELECT * FROM invoices WHERE invoice_no=? ORDER BY rowid LIMIT 1", (invoice_no,)
         ).fetchone()
-        return InvoiceRecord.from_dict(dict(row) | {"fields": []}) if row else None
+        return _invoice_from_row(conn, row) if row else None
 
     # -------------------------------------------------------------- batches
     def save_batch(self, batch: Batch) -> None:
@@ -210,27 +282,14 @@ class Database:
         row = self.connect().execute(
             "SELECT * FROM batches WHERE id=?", (batch_id,)
         ).fetchone()
-        if not row:
-            return None
-        data = dict(row)
-        data["summary"] = json.loads(data.pop("summary_json") or "{}")
-        report_raw = data.pop("report_json", "")
-        data["report"] = json.loads(report_raw) if report_raw else None
-        return Batch.from_dict(data)
+        return _batch_from_row(row) if row else None
 
     def list_batches(self) -> list[Batch]:
         """列出全部批次（按开始时间倒序）。"""
         rows = self.connect().execute(
             "SELECT * FROM batches ORDER BY started_at DESC"
         ).fetchall()
-        result: list[Batch] = []
-        for row in rows:
-            data = dict(row)
-            data["summary"] = json.loads(data.pop("summary_json") or "{}")
-            report_raw = data.pop("report_json", "")
-            data["report"] = json.loads(report_raw) if report_raw else None
-            result.append(Batch.from_dict(data))
-        return result
+        return [_batch_from_row(row) for row in rows]
 
     def update_batch_status(self, batch_id: str, status: str,
                             summary: dict[str, Any] | None = None,
@@ -266,9 +325,11 @@ class Database:
         """保存/更新计划及其计划项。"""
         conn = self.connect()
         conn.execute(
-            """INSERT INTO plans(id,batch_id,status,created_at) VALUES(?,?,?,?)
-               ON CONFLICT(id) DO UPDATE SET status=excluded.status""",
-            (plan.id, plan.batchId, plan.status.value, plan.createdAt),
+            """INSERT INTO plans(id,batch_id,status,profile_version,created_at)
+               VALUES(?,?,?,?,?)
+               ON CONFLICT(id) DO UPDATE SET
+                 status=excluded.status, profile_version=excluded.profile_version""",
+            (plan.id, plan.batchId, plan.status.value, plan.profileVersion, plan.createdAt),
         )
         conn.execute("DELETE FROM plan_items WHERE plan_id=?", (plan.id,))
         for idx, item in enumerate(plan.items):
@@ -289,7 +350,7 @@ class Database:
         row = conn.execute("SELECT * FROM plans WHERE id=?", (plan_id,)).fetchone()
         if not row:
             return None
-        plan = Plan.from_dict(dict(row))
+        plan = _plan_from_row(row)
         items = conn.execute(
             "SELECT * FROM plan_items WHERE plan_id=? ORDER BY rowid", (plan_id,)
         ).fetchall()

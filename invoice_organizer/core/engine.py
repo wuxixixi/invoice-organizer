@@ -222,16 +222,21 @@ class OrganizeEngine:
 
     # ---------------------------------------------------------------- 计划
     def build_plan(self, batchId: str) -> Plan:
-        """根据某批次已收集记录构建计划（DRAFT）。"""
+        """根据某批次已收集记录构建计划（DRAFT）。
+
+        计划版本绑定批次启动时快照的 profileVersion，不随运行中配置漂移。
+        """
         items: list[PlanItem] = self._temp_items.pop(batchId, [])
+        batch = self.db.get_batch(batchId)
+        # 优先取批次启动时的配置版本；批次缺失时回退当前版本（防御性兜底）
+        version = batch.profileVersion if batch else self.config.version
         plan = Plan(
             id="P" + uuid.uuid4().hex[:16], batchId=batchId, items=items,
-            status=PlanStatus.DRAFT, profileVersion=self.config.version,
+            status=PlanStatus.DRAFT, profileVersion=version,
             createdAt=_now(),
         )
         self.db.save_plan(plan)
         self._plans[plan.id] = plan
-        batch = self.db.get_batch(batchId)
         if batch:
             batch.status = BatchStatus.PREVIEW
             self.db.save_batch(batch)

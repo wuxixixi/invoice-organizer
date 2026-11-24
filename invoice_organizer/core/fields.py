@@ -171,7 +171,8 @@ class FieldExtractor:
         if not value:
             return Confidence.NEED_HUMAN
         if key in ("buyerTaxId", "sellerTaxId"):
-            return self._validate_tax_id(value)
+            # 格式合法时沿用来源置信（文本层=high / OCR=low），非法才 need_human
+            return base_conf if self._is_valid_tax_id(value) else Confidence.NEED_HUMAN
         if key == "issueDate":
             return base_conf if DateUtil.normalize(value) else Confidence.NEED_HUMAN
         if key == "amountCent":
@@ -179,14 +180,20 @@ class FieldExtractor:
                 else Confidence.NEED_HUMAN
         return base_conf
 
-    def _validate_tax_id(self, value: str) -> Confidence:
-        """统一社会信用代码校验：18 位且字符集合法则沿用基础置信，否则 need_human。"""
+    @staticmethod
+    def _is_valid_tax_id(value: str) -> bool:
+        """统一社会信用代码格式校验（18 位且字符集合法）。
+
+        仅判断“格式是否合法”，不决定置信状态；置信由 _confidence_for 结合来源综合判定。
+        """
         cleaned = re.sub(r"\s", "", value).upper()
         if len(cleaned) != TAX_ID_LENGTH:
-            return Confidence.NEED_HUMAN
-        if any(ch not in TAX_ID_CHARS for ch in cleaned):
-            return Confidence.NEED_HUMAN
-        return Confidence.HIGH
+            return False
+        return not any(ch not in TAX_ID_CHARS for ch in cleaned)
+
+    def _validate_tax_id(self, value: str) -> Confidence:
+        """税号格式校验原语：合法 HIGH，非法 NEED_HUMAN（保留供单独校验调用）。"""
+        return Confidence.HIGH if self._is_valid_tax_id(value) else Confidence.NEED_HUMAN
 
     # ------------------------------------------------------------- finders
     @staticmethod

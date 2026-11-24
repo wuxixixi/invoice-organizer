@@ -199,7 +199,8 @@ def test_write_atomic_uses_same_dir_temp_then_replace(tmp_watch: Path, tmp_archi
 
     monkeypatch.setattr("invoice_organizer.core.archiver.os.replace", spy_replace)
 
-    assert Archiver._write_atomic(str(src), str(dest)) is True
+    archiver = Archiver(PathGuard(str(tmp_archive)))
+    assert archiver._write_atomic(str(src), str(dest)) is True
     assert seen["target"] == str(dest)
     assert dest.read_bytes() == b"payload"
     assert list(dest.parent.glob(".*.tmp")) == []
@@ -303,6 +304,79 @@ def test_one_pdf_two_invoices_produces_two_plan_items(qa_engine: OrganizeEngine,
     invoices = qa_engine.db.list_invoices(batch_id)
     assert {inv.invoiceNo for inv in invoices} == {"11111111", "22222222"}
     assert all(any(ref.fileHash == sha for ref in inv.sources) for inv in invoices)
+
+
+# --------------------------------------------------------------- 存储往返
+def test_database_roundtrip_preserves_invoice_values() -> None:
+    """落库再读出后，票号/日期/金额/字段槽位必须保持原值。"""
+    inv = InvoiceRecord(id="Iroundtrip", invoiceNo="24312000000012345678",
+                        issueDate="2024-11-24", amountCent=123456, status="PREVIEW")
+    inv.set_field("invoiceNo", FieldSlot("invoiceNo", "24312000000012345678"))
+    inv.set_field("amountCent", FieldSlot("amountCent", "1234.56"))
+    db = Database(":memory:")
+    db.init_schema()
+    db.save_invoice(inv)
+
+    listed = db.list_invoices()
+    assert len(listed) == 1
+    assert listed[0].invoiceNo == "24312000000012345678"
+    assert listed[0].issueDate == "2024-11-24"
+    assert listed[0].amountCent == 123456
+    assert listed[0].get_field("invoiceNo").value == "24312000000012345678"
+
+    fetched = db.get_invoice("Iroundtrip")
+    assert fetched is not None and fetched.invoiceNo == "24312000000012345678"
+    assert fetched.amountCent == 123456
+
+
+def test_database_roundtrip_preserves_batch_snapshot() -> None:
+    """批次配置快照与版本落库后必须能原样读回（回溯依据）。"""
+    from invoice_organizer.models.batch import Batch, BatchStatus
+
+    db = Database(":memory:")
+    db.init_schema()
+    snapshot = '{"version": 7, "profileId": "default"}'
+    db.save_batch(Batch(id="B7", profileVersion=7, configSnapshot=snapshot,
+                        status=BatchStatus.PREVIEW))
+
+    fetched = db.get_batch("B7")
+    assert fetched is not None
+    assert fetched.profileVersion == 7
+    assert fetched.configSnapshot == snapshot
+
+
+def test_exported_ledger_contains_extracted_values(qa_engine: OrganizeEngine,
+                                                   tmp_watch: Path,
+                                                   monkeypatch: pytest.MonkeyPatch) -> None:
+    """端到端导出的台账必须含票号与金额，而非空行。"""
+    import csv
+
+    src = tmp_watch / "invoice.pdf"
+    src.write_bytes(b"%PDF-1.4 export-case")
+    sha = HashUtil.file_sha256(src)
+    parsed = ParseResult(
+        fields=[RawTextField("", "发票号码：24312000000012345678", 1, (1, 2, 3, 4)),
+                RawTextField("", "开票日期：2024年11月24日", 1, (1, 2, 3, 4)),
+                RawTextField("", "合计 ¥1,234.56", 1, (1, 2, 3, 4))],
+        sourceHash=sha, sourcePath=str(src), adapterName="pdf_text_stub",
+    )
+    monkeypatch.setattr(qa_engine.registry, "parse", lambda *_a, **_k: parsed)
+    qa_engine.config.export.format = "csv"
+
+    batch_id = qa_engine.start("default")
+    qa_engine.on_stable_file(StableFile(str(src), sha, src.stat().st_size,
+                                        src.stat().st_mtime_ns))
+    plan = qa_engine.build_plan(batch_id)
+    qa_engine.confirm_plan(plan.id, [])
+    qa_engine.execute_batch(batch_id)
+
+    ledgers = list((qa_engine.data_dir / "exports").glob("ledger_*.csv"))
+    assert ledgers, "应生成 CSV 台账"
+    with open(ledgers[0], encoding="utf-8-sig", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert rows, "台账应至少有一行数据"
+    assert rows[0].get("invoiceNo") == "24312000000012345678"
+    assert rows[0].get("amountCent") == "1234.56"
 
 
 # ----------------------------------------------------------------- 字段
@@ -516,6 +590,7 @@ def test_bridge_config_change_requires_admin(tmp_path: Path) -> None:
     assert "E701" in denied["message"]
     assert stub.db.profiles == [] and stub.db.audits == []
 
+    bridge.set_role("admin")
     allowed = bridge.save_config(cfg.to_json())
     assert allowed["code"] == 0
     assert allowed["data"]["version"] == 2

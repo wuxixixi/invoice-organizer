@@ -185,7 +185,7 @@ class ImageOcrAdapter(ParserAdapter):
         )
         if isinstance(self.backend, TextLayerOcrAdapter):
             result.warnings.append(
-                f"{ERROR_CODES['E402']}: 无可用 OCR 引擎，字段降级为待人工确认"
+                f"E402 {ERROR_CODES['E402']}: 无可用 OCR 引擎，字段降级为待人工确认"
             )
             return result
         attempts = max(1, int(ctx.retry or 1))
@@ -193,7 +193,7 @@ class ImageOcrAdapter(ParserAdapter):
             fields, error = self.parse_in_subprocess(path, ctx)
             if error == "timeout":
                 result.warnings.append(
-                    f"{ERROR_CODES['E401']}: OCR 第 {attempt}/{attempts} 次超时"
+                    f"E401 {ERROR_CODES['E401']}: OCR 第 {attempt}/{attempts} 次超时"
                 )
                 continue
             if error:
@@ -202,7 +202,7 @@ class ImageOcrAdapter(ParserAdapter):
             result.fields = fields
             return result
         result.warnings.append(
-            f"{ERROR_CODES['E402']}: OCR 不可用，字段降级为待人工确认"
+            f"E402 {ERROR_CODES['E402']}: OCR 不可用，字段降级为待人工确认"
         )
         return result
 
