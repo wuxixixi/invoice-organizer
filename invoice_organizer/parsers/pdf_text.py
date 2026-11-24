@@ -5,6 +5,7 @@ pdfplumber 为可选依赖；缺失或解析失败时返回带告警的空结果
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from invoice_organizer import ERROR_CODES
 from invoice_organizer.parsers.base import (
@@ -13,6 +14,30 @@ from invoice_organizer.parsers.base import (
     ParserAdapter,
     RawTextField,
 )
+
+
+def _group_lines(words: list[dict[str, Any]]
+                 ) -> list[tuple[str, tuple[float, float, float, float]]]:
+    """按 top 分桶（约 ±3px）、x0 排序、空格拼接，重建行级文本。
+
+    旧版增值税票的词级 token 常把「开票日期:2017 / 年07 / 月02日」「合 / 计」拆散，
+    行级文本用于还原完整标签与数值；以 ``label="line"`` 与词级字段区分。
+    """
+    buckets: dict[int, list[dict[str, Any]]] = {}
+    for word in words:
+        buckets.setdefault(int(round(float(word.get("top", 0.0)) / 3.0)), []).append(word)
+    lines: list[tuple[str, tuple[float, float, float, float]]] = []
+    for key in sorted(buckets):
+        group = sorted(buckets[key], key=lambda w: float(w.get("x0", 0.0)))
+        text = " ".join(t for w in group if (t := str(w.get("text", "")).strip()))
+        if not text:
+            continue
+        x0 = min(float(w.get("x0", 0.0)) for w in group)
+        x1 = max(float(w.get("x1", x0)) for w in group)
+        top = min(float(w.get("top", 0.0)) for w in group)
+        bottom = max(float(w.get("bottom", top)) for w in group)
+        lines.append((text, (x0, top, x1, bottom)))
+    return lines
 
 
 class PdfTextAdapter(ParserAdapter):
@@ -50,6 +75,11 @@ class PdfTextAdapter(ParserAdapter):
                             bbox=(float(word.get("x0", 0.0)), float(word.get("top", 0.0)),
                                   float(word.get("x1", 0.0)), float(word.get("bottom", 0.0))),
                         ))
+                    # 行级字段追加在词级字段之后：既有「首个命中」顺序不变
+                    for line_text, line_bbox in _group_lines(words):
+                        result.fields.append(RawTextField(
+                            label="line", text=line_text, page=page_no, bbox=line_bbox,
+                        ))
                     if not words:
                         text = page.extract_text() or ""
                         if text:
@@ -65,4 +95,4 @@ class PdfTextAdapter(ParserAdapter):
         return result
 
 
-__all__ = ["PdfTextAdapter"]
+__all__ = ["PdfTextAdapter", "_group_lines"]

@@ -127,6 +127,8 @@ class LlmConfig:
     prompt: str = (
         "从发票文本中提取 invoiceNo、issueDate、buyerName、buyerTaxId、"
         "sellerName、sellerTaxId、itemName、amountCent 八个字段，"
+        "旧版增值税票密码区叠印可能导致购买方税号乱码，无法确定时输出空字符串，不得猜测；"
+        "不含税金额取「合计」行而非「价税合计」。"
         "仅输出 JSON 对象，键为英文键名，值为字符串，无法确定则输出空字符串。"
     )
 

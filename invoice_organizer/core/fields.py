@@ -82,6 +82,9 @@ class FieldExtractor:
         fields: list[RawTextField] = [f for f in result.fields if f.text and f.text.strip()]
         is_ocr = "ocr" in (result.adapterName or "").lower()
         base_conf = Confidence.LOW if is_ocr else Confidence.HIGH
+        all_text = "\n".join(f.text for f in fields)
+        is_digital = "电子发票（普通发票）" in all_text
+        is_legacy = "增值税" in all_text and not is_digital
 
         inv = InvoiceRecord(
             id="INV" + uuid.uuid4().hex[:16],
@@ -113,14 +116,29 @@ class FieldExtractor:
         # 3-6) 购买方/销售方 名称与税号（按上下文线索 + 出现顺序区分买卖方）
         name_hits = self._find_party(fields, "Name")
         tax_hits = self._find_party(fields, "TaxId")
+        if is_legacy:
+            # 旧票税号与「购/销」角色字分属不同 token，按坐标重建归属
+            geo = self._find_tax_ids_by_role_geometry(fields)
+            buyer_tax_hits, seller_tax_hits = geo["buyer"], geo["seller"]
+        else:
+            buyer_tax_hits, seller_tax_hits = tax_hits[:1], tax_hits[1:2]
         for key, hits in (
             ("buyerName", name_hits[:1]),
             ("sellerName", name_hits[1:2]),
-            ("buyerTaxId", tax_hits[:1]),
-            ("sellerTaxId", tax_hits[1:2]),
+            ("buyerTaxId", buyer_tax_hits[:1]),
+            ("sellerTaxId", seller_tax_hits[:1]),
         ):
             slot = self._slot_from_hits(key, hits, source_name, base_conf)
             inv.set_field(key, slot)
+
+        # 买卖方税号相同必属错位：清空证据较弱的 buyer 槽，交 LLM/人工补全
+        buyer_tax = inv.get_field("buyerTaxId")
+        seller_tax = inv.get_field("sellerTaxId")
+        if buyer_tax.value and seller_tax.value and buyer_tax.value == seller_tax.value:
+            inv.set_field("buyerTaxId", FieldSlot(
+                key="buyerTaxId", value="", confidence=Confidence.NEED_HUMAN,
+                evidence=Evidence(sourceFile=source_name),
+            ))
 
         # 7) 项目名称（多行合并）
         inv.set_field("itemName", self._extract_slot(
@@ -239,7 +257,14 @@ class FieldExtractor:
             # 格式合法时沿用来源置信（文本层=high / OCR=low），非法才 need_human
             return base_conf if self._is_valid_tax_id(value) else Confidence.NEED_HUMAN
         if key == "issueDate":
-            return base_conf if DateUtil.normalize(value) else Confidence.NEED_HUMAN
+            if not DateUtil.normalize(value):
+                return Confidence.NEED_HUMAN
+            try:
+                year = int(str(value)[:4])
+            except (ValueError, TypeError):
+                return Confidence.NEED_HUMAN
+            # 机器编号等 8 位数字会被当成 YYYYMMDD 归一，用年份范围拦截
+            return base_conf if 1900 <= year <= 2100 else Confidence.NEED_HUMAN
         if key == "amountCent":
             return base_conf if MoneyUtil.yuan_to_cent(value) > 0 or value == "0.00" \
                 else Confidence.NEED_HUMAN
@@ -288,8 +313,10 @@ class FieldExtractor:
         return None
 
     def _find_date(self, fields: Sequence[RawTextField]) -> tuple[str, RawTextField, str] | None:
-        """查找开票日期并归一。"""
+        """查找开票日期并归一；跳过机器编号等非票面日期数字。"""
         for f in self._priority_fields(fields, _LABEL_HINTS["issueDate"]):
+            if "机器编号" in f.text:
+                continue
             for m in _DATE_RE.finditer(f.text):
                 normalized = DateUtil.normalize(m.group(0))
                 if normalized:
@@ -353,21 +380,85 @@ class FieldExtractor:
                 values.append(value)
         return values
 
+    @staticmethod
+    def _find_tax_ids_by_role_geometry(fields: Sequence[RawTextField]
+                                        ) -> dict[str, list[tuple[str, RawTextField, str]]]:
+        """按「购/买/销/卖/售/方」角色字的几何距离归属税号（旧票专用）。
+
+        旧票的角色字是独立 token，税号 token 自身不含上下文；以
+        ``|Δtop|*3 + |Δx0|`` 取最近锚点，「方」再按 x0 就近归入购/销。
+        """
+        roles = ("购", "买", "销", "卖", "售", "方")
+        anchors = [f for f in fields if f.text.strip() in roles]
+        party = [f for f in anchors if f.text.strip() in ("购", "销")]
+        result: dict[str, list[tuple[str, RawTextField, str]]] = {
+            "buyer": [], "seller": [],
+        }
+        if not anchors:
+            return result
+        for f in fields:
+            if f.text.strip() in roles:
+                continue
+            values = FieldExtractor._extract_party_values(f.text, "TaxId")
+            if not values:
+                continue
+            x, y = f.bbox[0], f.bbox[1]
+            anchor = min(anchors,
+                         key=lambda a: abs(a.bbox[1] - y) * 3 + abs(a.bbox[0] - x))
+            label = anchor.text.strip()
+            if label in ("购", "买"):
+                role = "buyer"
+            elif label in ("销", "卖", "售"):
+                role = "seller"
+            else:
+                base = min(party, key=lambda a: abs(a.bbox[0] - anchor.bbox[0])) \
+                    if party else None
+                role = "buyer" if base is not None and base.text.strip() == "购" else "seller"
+            for value in values:
+                result[role].append((value, f, f.text))
+        return result
+
     def _find_item_name(self, fields: Sequence[RawTextField]) -> tuple[str, RawTextField, str] | None:
         """查找项目名称（含 `*类别*明细` 格式或多行标签）。"""
         for f in fields:
             m = _ITEM_RE.search(f.text)
-            if m:
+            # 密码区叠印会产出 `*938*//-…` 伪项目名：必须含中文才算有效项目
+            if m and re.search(r"[\u4e00-\u9fff]", m.group(0)):
                 return m.group(0).strip(), f, f.text
         for f in self._priority_fields(fields, _LABEL_HINTS["itemName"]):
             m = re.search(r"(?:项目名称|货物或应税劳务[、,，]?服务名称|服务名称)\s*[:：]\s*(.+)", f.text)
             if m and m.group(1).strip():
                 return m.group(1).strip(), f, f.text
+        # 旧版票表头与项目名分行：取表头之后首个「≥2 中文且不含数字」的 token
+        header = next((f for f in fields
+                       if "货物或应税劳务" in f.text or "项目名称" in f.text), None)
+        if header is not None:
+            below = sorted((f for f in fields if f.bbox[1] > header.bbox[1] + 4),
+                           key=lambda f: f.bbox[1])
+            for f in below:
+                text = f.text.strip()
+                if len(re.findall(r"[\u4e00-\u9fff]", text)) >= 2 and not re.search(r"\d", text):
+                    return text, f, f.text
         return None
 
     def _extract_amount(self, fields: Sequence[RawTextField], source_name: str,
                         base_conf: Confidence, amount_source: str) -> FieldSlot:
         """提取金额：默认取“合计”不含税，totalInclTax 取“价税合计”。"""
+        # 旧版增值税票：「合/计」被拆词，小写金额是价税合计；改从行级「合计」行取值
+        all_text = "\n".join(f.text for f in fields)
+        if ("增值税" in all_text and "电子发票（普通发票）" not in all_text
+                and amount_source != AMOUNT_SOURCE_INCL_TAX):
+            legacy = self._find_legacy_excl_tax(fields)
+            if legacy is not None:
+                value, field = legacy
+                cents = MoneyUtil.yuan_to_cent(value)
+                confidence = self._confidence_for("amountCent", value, base_conf) if cents > 0 \
+                    else Confidence.NEED_HUMAN
+                return FieldSlot(
+                    key="amountCent", value=value, confidence=confidence,
+                    evidence=Evidence(sourceFile=source_name, page=field.page, bbox=field.bbox,
+                                      rawText=f"合计不含税: {field.text}"),
+                )
         incl_hit = self._find_amount_by_label(fields, ("价税合计",))
         excl_hit = self._find_amount_by_label(fields, ("合计", "金额合计", "小写"))
 
@@ -391,6 +482,18 @@ class FieldExtractor:
             evidence=Evidence(sourceFile=source_name, page=field.page, bbox=field.bbox,
                               rawText=f"{key_note}: {field.text}"),
         )
+
+    @staticmethod
+    def _find_legacy_excl_tax(fields: Sequence[RawTextField]
+                              ) -> tuple[str, RawTextField] | None:
+        """旧版增值税票：行级「合计」行去空格后取不含税金额。"""
+        for f in fields:
+            if f.label != "line":
+                continue
+            m = re.search(r"合计¥?(\d+\.\d{2})", re.sub(r"\s+", "", f.text))
+            if m:
+                return m.group(1), f
+        return None
 
     @staticmethod
     def _find_amount_by_label(fields: Sequence[RawTextField], labels: Sequence[str]
