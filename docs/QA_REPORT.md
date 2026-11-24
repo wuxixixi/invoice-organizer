@@ -4,7 +4,7 @@
 |---|---|
 | 执行人 | 严过关（Yan）· QA 工程师（独立验证，不复述工程师自审结论） |
 | 项目路径 | `H:/fapiao/invoice-organizer`（main 分支） |
-| 报告阶段 | 第 1 轮已完成；第 2 轮回归待工程师修复后执行 |
+| 报告阶段 | 第 1、2 轮均已完成（第 2 轮回归全绿，路由 NoOne） |
 | 判定依据 | `docs/PRD.md` v1.0、`docs/ARCHITECTURE.md` v1.0、`README.md` |
 
 ---
@@ -172,9 +172,121 @@ EXIT_CODE=0
 
 ---
 
-## 7. 第 2 轮回归
+## 7. 第 2 轮回归（工程师修复后）
 
-> 待 software-engineer 修复上述缺陷后填写。按 2 轮上限执行：若第 2 轮仍有失败，立即停止并转入第 8 节遗留问题，不进入第 3 轮。
+### 7.1 三项验证原始输出
+
+`python -m compileall -q invoice_organizer`
+
+```text
+Stdout: EXIT_CODE=0
+
+Stderr: (empty)
+Exit Code: 0
+```
+
+`python -m pytest -q`
+
+```text
+..................................................................       [100%]
+66 passed in 0.93s
+EXIT_CODE=0
+```
+
+`python -m invoice_organizer --diag`
+
+```text
+invoice_organizer v1.0.0 自检（schemaVersion=1）
+Python: 3.13.14
+- 共享常量 -
+  [OK] 八字段键顺序
+  [OK] 错误码数量
+- 配置 -
+  [OK] 默认配置校验
+  [OK] 默认配置序列化往返
+  [OK] 配置加载器可用
+- 工具 -
+  [OK] SHA-256 字节
+  [OK] 日期归一
+  [OK] 元转分
+  [OK] 路径守卫
+- 存储 -
+  [OK] SQLite 建表
+
+自检全部通过。
+EXIT_CODE=0
+```
+
+### 7.2 回归结论
+
+| 缺陷 | 修复核验 | 证据 |
+|---|---|---|
+| A（P0 存储往返） | 已修复 | 新增集中式 `_invoice_from_row/_batch_from_row/_plan_from_row` 映射，字段槽位/items/sources 均加载；`test_database_roundtrip_*`、`test_exported_ledger_contains_extracted_values`、`test_one_pdf_two_invoices_produces_two_plan_items` 全通过 |
+| B（错误码描述化） | 已修复 | `Archiver.errorCode` 改为码字面量，OCR warning 改为 `E401/E402 + 描述`；5 条相关用例全通过 |
+| C（OCR 税号置信） | 已修复 | 拆分校验原语 `_is_valid_tax_id` 与置信决策，`_confidence_for` 合法税号沿用 `base_conf`；OCR 税号用例通过，原 `test_tax_id_validation` 未回退 |
+| D（计划版本漂移） | 已修复 | `build_plan()` 从批次快照读 `profileVersion`；用例通过 |
+
+反向核查：`git diff` 显示 QA 用例文件的差异仅为 QA 第 1 轮自身修正与新增断言，工程师未削弱任何测试；源码修复为通用逻辑，非测试专用分支。
+
+**第 2 轮结果：66 / 66 通过（原 30 + 新增 36），0 失败。** 按 2 轮上限结束测试，不再进入第 3 轮。
+
+### 7.3 QA 独立复核（software-qa-engineer-2 二次重跑确认）
+
+为消除单人验证偏差，第二名 QA 独立重跑三项验证，原始输出如下（与 7.1 结论一致，耗时差异属正常波动）：
+
+`python -m compileall -q invoice_organizer`
+
+```text
+Stdout: (empty)
+Stderr: (empty)
+Exit Code: 0
+Signal: (none)
+```
+
+`python -m pytest -q`
+
+```text
+..................................................................       [100%]
+66 passed in 1.13s
+
+Stderr: (empty)
+Exit Code: 0
+```
+
+`python -m invoice_organizer --diag`
+
+```text
+invoice_organizer v1.0.0 自检（schemaVersion=1）
+Python: 3.13.14
+- 共享常量 -
+  [OK] 八字段键顺序
+  [OK] 错误码数量
+- 配置 -
+  [OK] 默认配置校验
+  [OK] 默认配置序列化往返
+  [OK] 配置加载器可用
+- 工具 -
+  [OK] SHA-256 字节
+  [OK] 日期归一
+  [OK] 元转分
+  [OK] 路径守卫
+- 存储 -
+  [OK] SQLite 建表
+
+自检全部通过。
+
+Stderr: (empty)
+Exit Code: 0
+```
+
+逐条模式 `python -m pytest -v -rs` 核验：`collected 66 items`，66 条全部 `PASSED`，**0 skipped / 0 deselected**，排除条件跳过蒙混。第 1 轮 4 类缺陷对应用例逐项确认：
+
+- A（P0）：`test_database_roundtrip_preserves_invoice_values`、`test_database_roundtrip_preserves_batch_snapshot`、`test_exported_ledger_contains_extracted_values`、`test_one_pdf_two_invoices_produces_two_plan_items`、`test_plan_version_matches_batch_snapshot`（快照读回部分）全部 PASSED；源码核对 `storage/db.py:31-108` 新增 `_*_from_row()` 集中映射（snake_case→camelCase）、字段槽位/items_json/sources_json 均还原，P0 数据丢失闭环。
+- B：`test_archiver_rejects_traversal_and_continues`、`test_archiver_rejects_symlinked_parent`、`test_hash_mismatch_sets_e603`、`test_engine_failure_rolls_back_copies_only`、`test_ocr_timeout_retries_finite_then_degrades` 全 PASSED；`archiver.py:101,111,131` 写标准码、`image_ocr.py:196,204` 带 `E401/E402`。
+- C：`test_ocr_valid_tax_id_is_low_confidence` PASSED；`fields.py:169-181` 合法税号沿用来源置信（OCR=LOW）。
+- D：`test_plan_version_matches_batch_snapshot` PASSED；`engine.py:232` 改读批次快照 `profileVersion`，运行中配置 +7 不漂移。
+
+独立复核结论与 7.2 一致：**第 2 轮 NoOne，66/66 全通过**。
 
 ---
 
@@ -182,15 +294,20 @@ EXIT_CODE=0
 
 | 项 | 说明 | 状态 |
 |---|---|---|
-| 落盘前父目录 TOCTOU | `Archiver._execute_one()` 在 `mkdir()` 之前完成 `resolve_inside()`，但未在 `os.replace()` 前再次复核真实路径；理论上校验后至写入前若目录被替换为软链接可越界。当前平台无法稳定构造该竞态，未写不稳定用例。建议写入前对 `dest.parent.resolve()` 做二次 `resolve_inside()` 复核。 | 观察，非失败用例 |
+| 落盘前父目录 TOCTOU | `Archiver._execute_one()` 在 `mkdir()` 之前完成 `resolve_inside()`，但未在 `os.replace()` 前再次复核真实路径；理论上校验后至写入前若目录被替换为软链接可越界。当前平台无法稳定构造该竞态，未写不稳定用例。建议写入前对 `dest.parent.resolve()` 做二次 `resolve_inside()` 复核。**第 2 轮复核确认**：全局 `resolve_inside()` 仅 `archiver.py:108` 一处，`os.replace()`（`:155`）前未加二次复核，工程师**未修复此项**；维持观察状态，不阻断放行。 | 观察，非失败用例（未修复，维持） |
 | `Archiver.execute()` 自身不回滚 | 回滚由 `OrganizeEngine.execute_batch()` 负责；直接调用 `Archiver.execute()` 的调用方需自行 `rollback()`。系统级行为正确，接口文档 `Archiver.execute` 的「已回滚」描述略有误导。 | 观察 |
 | `test_xlsx_columns` 条件跳过 | openpyxl 缺失时静默 return，建议改为 `pytest.importorskip("openpyxl")`。 | 低优先级 |
+| **旧 v1 数据库升级兼容性（新发现）** | 修复 A 时在 `V1_STATEMENTS` 的 CREATE TABLE 中新增 `invoices.items_json / sources_json`、`plans.profile_version`，但 `schemaVersion` 仍为 1，`Migrations.migrate()` 对已标记 `user_version=1` 的旧库不会重建表。实测：对 v1 旧库调用 `save_invoice()` 报 `OperationalError: table invoices has no column named items_json`。当前仓库未随附 `.db` 文件，全新安装不受影响；已用早期版本产生过元数据库的机器升级后会写入失败。建议增加 v1→v1 兼容性 `ALTER TABLE ... ADD COLUMN` 补丁或提升 schemaVersion 并写 v2 迁移。 | 中；未在测试中复现为用户流程，仅代码审查 + 独立脚本验证 |
 
 ---
 
 ## 9. 最终路由判定
 
-- 第 1 轮：**Engineer**（4 类源码缺陷，11 条失败；测试代码问题已自行修复）
-- 第 2 轮：待回归后更新
+| 轮次 | 结果 | 路由 |
+|---|---|---|
+| 第 1 轮 | 55 passed / 11 failed，发现 4 类源码缺陷（含 1 个 P0）；2 处测试代码问题由 QA 自行修复 | **Engineer** |
+| 第 2 轮 | 66 passed / 0 failed；3 项验证全部通过；源码修复经 diff 反向核查为通用实现 | **NoOne** |
 
-> 说明：`compileall`、`--diag` 与原始 30 条 pytest 均通过，不能据此判定 NoOne；独立补充断言后暴露出 P0 级数据丢失缺陷。
+**最终判定：NoOne。** 关键行为已有真实断言覆盖，2 轮测试上限内全部通过，并经两名 QA（software-qa-engineer、software-qa-engineer-2）独立重跑交叉确认一致。第 8 节遗留项为改进建议，不构成当前版本阻断缺陷；其中「旧 v1 数据库升级兼容性」建议在发布说明中提示，或在下个版本补迁移；「落盘前父目录 TOCTOU」经复核未修复，维持观察。
+
+> 备注：初始 `compileall`、`--diag` 与 30 条 pytest 全绿并不足以支撑放行——独立补充断言后才暴露出 P0 级数据丢失缺陷，说明「通过率」必须结合断言有效性审阅。

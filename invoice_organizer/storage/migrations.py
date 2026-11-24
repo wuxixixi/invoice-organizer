@@ -141,6 +141,19 @@ V1_STATEMENTS: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_archives_plan_item ON archives(plan_item_id)",
 )
 
+# v1 初始发布后追加的列。旧库已标记 user_version=1，不会重跑 V1_STATEMENTS，
+# 因此每次迁移都必须按列做幂等补齐，避免 save_invoice/save_plan 抛
+# "table ... has no column named ..."。列名与声明必须与 V1_STATEMENTS 保持一致。
+COLUMN_PATCHES: dict[str, tuple[tuple[str, str], ...]] = {
+    "invoices": (
+        ("items_json", "TEXT NOT NULL DEFAULT '[]'"),
+        ("sources_json", "TEXT NOT NULL DEFAULT '[]'"),
+    ),
+    "plans": (
+        ("profile_version", "INTEGER NOT NULL DEFAULT 1"),
+    ),
+}
+
 
 class Migrations:
     """基于 SQLite ``PRAGMA user_version`` 的版本迁移。"""
@@ -151,8 +164,43 @@ class Migrations:
         return int(conn.execute("PRAGMA user_version").fetchone()[0])
 
     @staticmethod
+    def ensure_columns(conn: sqlite3.Connection) -> list[str]:
+        """幂等补齐已存在表中缺失的兼容列（ALTER TABLE ADD COLUMN，不删数据）。
+
+        对每张表先用 ``PRAGMA table_info`` 读取实际列集合；表不存在则跳过，
+        列已存在则跳过。因此对新库、旧库、重复调用均安全。
+
+        Args:
+            conn: SQLite 连接。
+
+        Returns:
+            本次实际补齐的列名列表，形如 ``["invoices.items_json"]``。
+
+        Raises:
+            sqlite3.Error: 迁移语句执行失败（由调用方事务负责回滚）。
+        """
+        added: list[str] = []
+        for table, columns in COLUMN_PATCHES.items():
+            exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+            ).fetchone()
+            if exists is None:
+                continue
+            present = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+            for name, declaration in columns:
+                if name in present:
+                    continue
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
+                added.append(f"{table}.{name}")
+        return added
+
+    @staticmethod
     def migrate(conn: sqlite3.Connection, to: int = SCHEMA_VERSION) -> None:
         """把数据库迁移到目标版本。
+
+        除按 ``user_version`` 执行建表分支外，还会无条件执行一次
+        :meth:`ensure_columns`，使已标记 v1 但缺少后续追加列的旧库原地升级，
+        无需提升 ``SCHEMA_VERSION`` 或删除数据库。
 
         Args:
             conn: SQLite 连接。
@@ -171,6 +219,8 @@ class Migrations:
                 conn.execute(statement)
             conn.execute("PRAGMA user_version = 1")
         # 未来版本可在此追加 current < 2 <= to 等分支
+        # v1 旧库缺列补丁：与 user_version 无关，始终幂等执行
+        Migrations.ensure_columns(conn)
 
 
-__all__ = ["Migrations", "V1_STATEMENTS"]
+__all__ = ["Migrations", "V1_STATEMENTS", "COLUMN_PATCHES"]

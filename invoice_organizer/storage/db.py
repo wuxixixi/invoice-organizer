@@ -138,10 +138,14 @@ class Database:
         return conn
 
     def init_schema(self) -> None:
-        """建表并迁移到当前 schema 版本（幂等）。"""
+        """建表并迁移到当前 schema 版本（幂等）。
+
+        始终以 ``SCHEMA_VERSION`` 为目标；旧库即使已标记 ``user_version=1``，
+        ``Migrations.migrate`` 仍会执行幂等列补丁，补齐后续追加的列。
+        """
         conn = self.connect()
         with self._init_lock:
-            Migrations.migrate(conn, Migrations.current_version(conn) or 1)
+            Migrations.migrate(conn)
             conn.commit()
 
     @contextmanager

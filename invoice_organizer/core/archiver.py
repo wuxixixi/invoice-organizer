@@ -118,6 +118,14 @@ class Archiver:
             dest = Path(dest_str)
             dest.parent.mkdir(parents=True, exist_ok=True)
 
+            # 落盘前二次复核（防 TOCTOU）：mkdir 之后真实父目录必须仍在归档根内，
+            # 且链路上无软链接；否则按 E501 拒绝，绝不创建目标文件。
+            try:
+                self.guard.resolve_inside(self.guard.archiveRoot, dest.parent)
+            except PathViolation:
+                result.errorCode = "E501"
+                return result
+
             # 原子写：临时文件（同目录）→ os.replace
             written = self._write_atomic(src, str(dest))
             if not written:

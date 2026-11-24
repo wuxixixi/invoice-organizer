@@ -4,6 +4,8 @@ from __future__ import annotations
 import csv
 from pathlib import Path
 
+import pytest
+
 from invoice_organizer.config.schema import ExportConfig
 from invoice_organizer.core.exporter import ExportEngine
 from invoice_organizer.models.batch import Batch, BatchReport, BatchStatus, BatchSummary
@@ -34,13 +36,12 @@ def test_csv_encoding_and_amount(tmp_path: Path) -> None:
 
 
 def test_xlsx_columns(tmp_path: Path) -> None:
-    """Excel 导出按列序，金额展示为元。"""
+    """Excel 导出按列序，金额展示为元；缺 openpyxl 时显式跳过。"""
+    load_workbook = pytest.importorskip("openpyxl").load_workbook
     cfg = ExportConfig(format="xlsx", columns=["invoiceNo", "amountCent"])
     engine = ExportEngine(cfg, tmp_path)
     path = engine.export_ledger([_invoice()], None)
-    if not path.endswith(".xlsx"):
-        return  # openpyxl 缺失降级为 CSV，测试跳过 xlsx 断言
-    from openpyxl import load_workbook  # type: ignore[import-not-found]
+    assert path.endswith(".xlsx"), "openpyxl 可用时必须导出 xlsx，不得降级为 CSV"
     sheet = load_workbook(path).active
     assert [c.value for c in sheet[1]] == ["invoiceNo", "amountCent"]
     assert sheet.cell(row=2, column=2).value == "1234.56"
