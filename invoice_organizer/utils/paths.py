@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path, PureWindowsPath
 
 from invoice_organizer import NEED_HUMAN_TEXT
@@ -209,4 +210,35 @@ class PathGuard:
         return c == p or p in c.parents
 
 
-__all__ = ["PathGuard", "PathViolation"]
+# ------------------------------------------------------------ 冻结资源路径
+def is_frozen() -> bool:
+    """是否运行在 PyInstaller 冻结环境。"""
+    return bool(getattr(sys, "frozen", False))
+
+
+def resource_root() -> Path:
+    """返回只读资源根目录：冻结环境为 ``sys._MEIPASS``，源码环境为仓库根。"""
+    if is_frozen():
+        return Path(str(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[2])))
+    return Path(__file__).resolve().parents[2]
+
+
+def resource_path(relative: str) -> Path:
+    """按仓库相对路径定位打包资源（ui/index.html、config/default.json 等）。"""
+    return resource_root() / relative
+
+
+def runtime_root() -> Path:
+    """返回可写数据根目录：冻结环境为 exe 同目录，源码环境为仓库根。
+
+    数据与密钥文件绝不写入 ``_MEIPASS``（临时解压目录），避免退出后丢失。
+    """
+    if is_frozen():
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parents[2]
+
+
+__all__ = [
+    "PathGuard", "PathViolation", "is_frozen",
+    "resource_root", "resource_path", "runtime_root",
+]

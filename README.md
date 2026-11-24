@@ -10,8 +10,9 @@
 | 能力 | 说明 |
 |---|---|
 | 输入监控与写稳检测 | 监控投放目录，文件大小 + mtime 两轮一致且无共享写句柄后才入队 |
-| 解析适配器 | PDF 文本层 / OFD-XML / 图片 OCR（可替换后端、受限子进程、超时终止）；无引擎时降级为「待人工确认」 |
+| 解析适配器 | PDF 文本层 / OFD-XML / 图片 OCR（DeepSeek-OCR-2 内网直连、受限子进程、超时终止）；失败降级为「待人工确认」 |
 | 八字段提取 | 票号 / 开票日期 / 购买方名称及税号 / 销售方名称及税号 / 项目名称 / 金额；每字段带证据与置信 |
+| 大模型结构化补全 | 仅对缺失 / 低置信字段用大模型结果补全，证据标 `llm`、置信 `low`；高置信字段永不覆盖 |
 | 金额与日期规范 | 金额整数分存储，默认取合计不含税；日期统一 `YYYY-MM-DD` |
 | 去重与冲突 | SHA-256 去重，五类情形（同号同哈希 / 同号异哈希 / 异号同哈希 / 一 PDF 多票 / 新文件）分支处理 |
 | 规则分类 | 按 `priority` 升序匹配，首条命中即停；未命中归入「未分类」 |
@@ -120,9 +121,28 @@ python -m invoice_organizer --diag
     "dedupe": true,
     "ocrRetry": 2,
     "ocrTimeoutSec": 20
+  },
+  "ocr": {
+    "provider": "deepseek_ocr",
+    "endpoint": "http://172.19.1.2:30080/v1/chat/completions",
+    "model": "default",
+    "apiKey": "",
+    "timeoutSec": 60
+  },
+  "llm": {
+    "enabled": true,
+    "endpoint": "http://172.19.1.10:8080/api/v1/chat/completions",
+    "model": "DeepSeek-V4-Flash-0731",
+    "apiKey": "",
+    "timeoutSec": 60,
+    "prompt": "从发票文本中提取八个字段，仅输出 JSON 对象……"
   }
 }
 ```
+
+> 安全约束：`ocr.apiKey` 与 `llm.apiKey` 在配置文件 / 配置快照中**始终为空字符串**。
+> OCR 服务无需 Key；大模型 Key 仅在运行时从环境变量 `INVOICE_LLM_KEY` 或
+> gitignore 的 `data/secrets.local.json` 读取，绝不写入任何受 git 跟踪的文件。
 
 ### 关键字段说明
 
@@ -138,6 +158,9 @@ python -m invoice_organizer --diag
 | `export.format` | `xlsx` 或 `csv` |
 | `execution.previewRequired` | `true` 时计划未经确认禁止执行归档（`E702`） |
 | `execution.ocrRetry` / `ocrTimeoutSec` | OCR 子进程超时（秒）与有限重试次数，超时转「待处理」 |
+| `ocr.provider` / `endpoint` / `model` | 图片 OCR 后端（默认 `deepseek_ocr`）、内网接口地址、模型标识 `default`；无需 Key，强制直连不经代理 |
+| `llm.enabled` / `endpoint` / `model` | 大模型结构化补全开关、内网接口地址、模型标识；强制直连 |
+| `llm.apiKey` | 仅内存注入：优先环境变量 `INVOICE_LLM_KEY`，其次 `data/secrets.local.json`；持久化配置中恒为空 |
 
 ---
 
@@ -161,15 +184,42 @@ python -m invoice_organizer --profile default
 4. **批次历史**：查看批次状态与统计；
 5. **待复核与导出**：回填待确认字段、执行归档、导出台账。
 
-前端为单页应用，**全部资源本地加载**（`ui/index.html` / `app.js` / `style.css`），无任何外网请求；
+前端为单页应用，**全部界面资源本地加载**（`ui/index.html` / `app.js` / `style.css`），无 CDN / 外链请求；
 所有数据经 `JsBridge` 以统一响应 `{code, data, message}` 交互（code=0 成功）。
+OCR 与大模型补全仅在配置的内网地址上直连通信，不经过系统代理或安全网关。
+
+---
+
+## 4.1 打包为 Windows exe（可选）
+
+安装开发依赖并双击 `build.bat`（或在命令行执行）：
+
+```bat
+build.bat
+```
+
+脚本等价于：
+
+```bat
+python -m PyInstaller build.spec --noconfirm --clean
+```
+
+- 产物：`dist\发票整理助手.exe`（单文件、windowed 无控制台窗口）；
+- 打包资源：`ui/*.html|js|css` 与 `config/*.json` 进入 `sys._MEIPASS`，
+  运行时由 `utils/paths.py` 的 `resource_path()` 定位；
+- 数据目录：exe 同目录下的 `data\`（配置、数据库、日志、密钥文件），
+  不写入临时解压目录；首次运行自动创建；
+- 密钥文件 `data/secrets.local.json` 需自行放在 exe 同目录的 `data\` 下，
+  或使用环境变量 `INVOICE_LLM_KEY`；该文件不会随 exe 分发。
+
+> `PyInstaller` 仅用于打包，不属于运行时依赖；未打包时仍可 `python -m invoice_organizer` 源码运行。
 
 ---
 
 ## 5. 测试方式
 
 ```bash
-# 运行全部测试（30 项）
+# 运行全部测试
 python -m pytest -q
 # 或
 pytest -q
@@ -199,6 +249,8 @@ invoice-organizer/
 │   ├── ui/                      # pywebview 桌面壳 + JsBridge + 本地前端（HTML/JS/CSS）
 │   ├── utils/                   # 工具层（流式哈希/路径安全/日期/金额/日志）
 │   └── tests/                   # pytest 用例与公共 fixture
+├── build.spec                   # PyInstaller 单文件打包配置
+├── build.bat                    # Windows 一键打包脚本
 ├── requirements.txt             # 依赖声明
 ├── pytest.ini                   # pytest 配置
 ├── .gitignore                   # 忽略运行产物
@@ -216,8 +268,12 @@ invoice-organizer/
 | `openpyxl` | Excel 台账导出 | xlsx 自动降级为 CSV |
 | `pywebview` | 桌面窗口 + JS↔Python bridge | 无法启动 GUI，`--diag` 与核心逻辑不受影响 |
 | `watchdog` | 目录事件监控 | 自动切轮询兜底（PollingObserver 语义） |
-| `pytesseract` | Tesseract OCR 适配器（需本机 tesseract 可执行文件） | 走 `TextLayerOcrAdapter` 降级，字段标「待人工确认」 |
+| `pytesseract` | Tesseract OCR 兜底适配器（需本机 tesseract 可执行文件） | DeepSeek OCR 失败时才尝试；都不可用则降级为「待人工确认」 |
+| `pyinstaller` | 开发期打包 Windows 单文件 exe | 不影响源码运行与测试 |
 | `pytest` | 测试 | 无法运行测试 |
+
+内置 `DeepSeekOcrAdapter` 与 `LlmClient` 仅用标准库（`urllib.request`），无需额外 Python 依赖；
+两者均使用 `ProxyHandler({})` 强制直连内网地址。
 
 标准库已覆盖 `sqlite3 / hashlib / multiprocessing / zipfile / xml.etree / pathlib / os.replace` 等核心能力。
 Umi-OCR 适配器为占位接口，通过本机环回 HTTP 调用，无需额外 Python 依赖。
@@ -231,11 +287,17 @@ A：`--diag` 不导入这些库。若你在启动桌面窗口时遇到缺失提�
 
 **Q2：启动桌面窗口失败？**
 A：pywebview 依赖系统 WebView2（Windows 10/11 x64 一般已内置；若无，需安装 WebView2 Runtime）。
-本软件为本地桌面应用，**不需要联网**，源码与前端均无外链资源。
+前端界面**不需要联网**；仅 OCR / 大模型补全会访问配置中的内网地址。
 
 **Q3：OCR 识别不出内容怎么办？**
-A：未安装 OCR 引擎 / tesseract 语言包缺失 / 识别超时都会降级为「待人工确认」，绝不臆造字段。
-可在「待复核与导出」视图人工回填。OCR 子进程超时会有限重试后转「待处理」，不会阻塞批次。
+A：内网 DeepSeek-OCR 不可达 / 返回空结果 / 识别超时都会尝试本机 tesseract 兜底，
+仍失败则降级为「待人工确认」，绝不臆造字段。可在「待复核与导出」视图人工回填。
+OCR 子进程超时会有限重试，不会阻塞批次。
+
+**Q3-1：大模型 Key 放在哪里？会不会被提交？**
+A：优先设置环境变量 `INVOICE_LLM_KEY`；或写入 exe / 项目同目录的 `data/secrets.local.json`
+（格式 `{"llm":{"apiKey":"<你的Key>"}}`）。`data/` 已被 `.gitignore` 忽略，
+Key 只在运行时注入内存，配置快照 / 数据库 / 日志均不含 Key。
 
 **Q4：保存配置报 `E502`（目录互相包含）？**
 A：`watch.path` 不能是 `archiveRoot` / `quarantine` 的父目录或子目录，三者必须相互独立。
@@ -254,5 +316,5 @@ A：这是环境中其他包注册的第三方 pytest 插件。`pytest.ini` 已�
 
 ---
 
-> 边界声明：本软件默认离线运行，不上传任何数据；原件只读；关键操作有本地审计日志；
-> 所有分类 / 去重 / 冲突结果均为整理辅助建议，最终判断权在人工。
+> 边界声明：本软件不访问公网、不上传数据到外部服务；图片 OCR 与字段结构化仅在用户配置的内网地址直连调用；
+> 原件只读；关键操作有本地审计日志；所有识别 / 分类 / 去重 / 冲突结果均为整理辅助建议，最终判断权在人工。

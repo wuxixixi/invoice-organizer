@@ -14,8 +14,10 @@ from typing import Sequence
 
 
 def _project_root() -> Path:
-    """返回项目根目录（本文件的上级目录）。"""
-    return Path(__file__).resolve().parent.parent
+    """返回可写数据根目录；冻结环境为 exe 同目录，源码环境为项目根目录。"""
+    from invoice_organizer.utils.paths import runtime_root
+
+    return runtime_root()
 
 
 def run_diag() -> int:
@@ -35,7 +37,7 @@ def run_diag() -> int:
     from invoice_organizer.utils.dates import DateUtil
     from invoice_organizer.utils.hashutil import HashUtil
     from invoice_organizer.utils.money import MoneyUtil
-    from invoice_organizer.utils.paths import PathGuard
+    from invoice_organizer.utils.paths import PathGuard, resource_path
     from invoice_organizer.storage.db import Database
 
     failures: list[str] = []
@@ -74,6 +76,19 @@ def run_diag() -> int:
         else None,
     )
     check("配置加载器可用", lambda: loader.load("default"))
+    check("OCR/LLM 配置校验",
+          lambda: (_ for _ in ()).throw(AssertionError("; ".join(errors)))
+          if any(("ocr." in e or "llm." in e) for e in errors) else None)
+    bundled = ProfileLoader.default_config()
+    check("OCR/LLM 密钥默认留空",
+          lambda: (_ for _ in ()).throw(AssertionError("密钥不得写入默认配置"))
+          if bundled.ocr.apiKey or bundled.llm.apiKey else None)
+    check("冻结资源：index.html",
+          lambda: (_ for _ in ()).throw(AssertionError("缺少 ui/index.html"))
+          if not resource_path("invoice_organizer/ui/index.html").is_file() else None)
+    check("冻结资源：default.json",
+          lambda: (_ for _ in ()).throw(AssertionError("缺少 config/default.json"))
+          if not resource_path("invoice_organizer/config/default.json").is_file() else None)
 
     print("- 工具 -")
     check("SHA-256 字节", lambda: (_ for _ in ()).throw(AssertionError("hash"))

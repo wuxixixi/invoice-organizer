@@ -11,6 +11,9 @@ pywebview>=5.0,<6.0               # 原生窗口 + JS↔Python bridge，加载�
 # ---- 目录监控 ----
 watchdog>=4.0.0,<5.0.0            # 文件事件监控；PollingObserver 作轮询兜底
 
+# ---- 打包（开发依赖：仅生成 Windows exe 时需要）----
+pyinstaller>=6,<7                 # build.spec 单文件打包；运行时不需要
+
 # ---- 测试 ----
 pytest>=8.3.0,<9.0.0              # 单元 / 集成 / 冒烟测试
 
