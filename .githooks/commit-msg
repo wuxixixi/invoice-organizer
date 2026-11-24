@@ -1,0 +1,8 @@
+#!/bin/sh
+# 规范提交信息：要求 Conventional Commits 风格
+msg_file="$1"
+msg=$(head -n 1 "$msg_file")
+case "$msg" in
+  feat:*|fix:*|docs:*|chore:*|test:*|refactor:*|build:*|ci:*|perf:*) exit 0 ;;
+  *) echo "[commit-msg] 提交信息需以 feat:/fix:/docs:/chore:/test:/refactor:/build:/ci:/perf: 开头" >&2; exit 1 ;;
+esac
