@@ -20,7 +20,10 @@ def engine(tmp_path: Path, config) -> OrganizeEngine:
     db = Database(tmp_path / "test.db")
     db.init_schema()
     loader = ProfileLoader(tmp_path / "data")
-    return OrganizeEngine(config=config, db=db, loader=loader, data_dir=tmp_path / "data")
+    return OrganizeEngine(
+        config=config, db=db, loader=loader, data_dir=tmp_path / "data",
+        allow_network=False,  # start() 重载磁盘配置后也不得真实访问内网 LLM
+    )
 
 
 def _pdf(tmp_watch: Path) -> Path:

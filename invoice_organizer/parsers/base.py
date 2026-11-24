@@ -58,7 +58,7 @@ class ParseContext:
 
 @runtime_checkable
 class OcrBackend(Protocol):
-    """OCR 后端协议（可替换：text-layer / tesseract / umi-ocr 占位）。"""
+    """OCR 后端协议（可替换：deepseek_ocr / text-layer / tesseract / umi-ocr）。"""
 
     name: str
 

@@ -7,6 +7,8 @@
 """
 from __future__ import annotations
 
+import json
+import os
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +21,7 @@ from invoice_organizer.core.archiver import Archiver, ArchiveResult
 from invoice_organizer.core.dedupe import DedupeResult, DedupeService
 from invoice_organizer.core.exporter import ExportEngine
 from invoice_organizer.core.fields import FieldExtractor
+from invoice_organizer.core.llm_client import LlmClient
 from invoice_organizer.core.rules import RuleEngine
 from invoice_organizer.core.template import TemplateEngine
 from invoice_organizer.core.watcher import FileWatcher, StableFile
@@ -47,12 +50,60 @@ def _batch_id() -> str:
     return f"B{now:%Y%m%d}-{now:%H%M%S}-{seq}"
 
 
+def _resolve_llm_key(data_dir: Path) -> str:
+    """从环境变量或 gitignore 的本地密钥文件读取 Key（优先环境变量）。
+
+    密钥只留在内存中：不写回配置、不落库、不进批次快照。
+    """
+    from_env = os.environ.get("INVOICE_LLM_KEY", "").strip()
+    if from_env:
+        return from_env
+    secret_path = data_dir / "secrets.local.json"
+    try:
+        payload = json.loads(secret_path.read_text(encoding="utf-8"))
+        section = payload.get("llm") or {}
+        return str(section.get("apiKey", "") or "").strip()
+    except (OSError, ValueError, TypeError, AttributeError):
+        return ""
+
+
+def _inject_llm_key(config: ProfileConfig, data_dir: Path,
+                    allow_network: bool = True) -> None:
+    """把运行时密钥注入配置对象（仅内存，不参与序列化）。
+
+    Args:
+        config: 当前配置。
+        data_dir: 数据目录（本地密钥文件所在目录）。
+        allow_network: False 时完全不读取密钥文件/环境变量（测试隔离）。
+    """
+    if not allow_network:
+        return
+    key = _resolve_llm_key(data_dir)
+    if key:
+        config.llm.apiKey = key
+
+
+def _build_llm_client(config: ProfileConfig,
+                      allow_network: bool = True) -> LlmClient | None:
+    """按配置构造大模型客户端；未启用或禁止联网时返回 None。"""
+    if not allow_network:
+        return None
+    llm = getattr(config, "llm", None)
+    if llm is None or not getattr(llm, "enabled", True):
+        return None
+    return LlmClient(
+        endpoint=llm.endpoint, model=llm.model, apiKey=llm.apiKey,
+        timeoutSec=llm.timeoutSec, prompt=getattr(llm, "prompt", ""),
+    )
+
+
 class OrganizeEngine:
     """发票整理全流程编排引擎。"""
 
     def __init__(self, config: ProfileConfig, db: Database,
                  loader: ProfileLoader | None = None,
-                 data_dir: str | Path | None = None) -> None:
+                 data_dir: str | Path | None = None,
+                 allow_network: bool = True) -> None:
         """初始化引擎及其协作组件。
 
         Args:
@@ -60,16 +111,22 @@ class OrganizeEngine:
             db: 元数据库。
             loader: 配置加载器（可选）。
             data_dir: 数据目录（导出与日志落点，默认当前目录 data）。
+            allow_network: False 时不读取密钥、不构造 LlmClient；用于测试隔离，
+                即使 start() 从磁盘重载 llm.enabled=True 的配置也不会真实联网。
         """
         self.config = config
         self.db = db
         self.loader = loader
         self.data_dir = Path(data_dir) if data_dir else Path("data")
+        self.allow_network = bool(allow_network)
         self._logger = get_logger()
 
-        self.registry = ParserRegistry()
+        _inject_llm_key(config, self.data_dir, self.allow_network)
+        self.registry = ParserRegistry(ocr_config=getattr(config, "ocr", None))
         self.dedupe = DedupeService(db)
-        self.extractor = FieldExtractor(config)
+        self.extractor = FieldExtractor(
+            config, llm_client=_build_llm_client(config, self.allow_network)
+        )
         self.rules = RuleEngine(config.categories)
         self.templates = TemplateEngine(config)
         self.watcher = FileWatcher(config.watch)
@@ -93,8 +150,13 @@ class OrganizeEngine:
         """
         if profileId and self.loader and profileId != self.config.profileId:
             self.config = self.loader.load(profileId)
+            _inject_llm_key(self.config, self.data_dir, self.allow_network)
+            self.registry = ParserRegistry(ocr_config=self.config.ocr)
             self.rules = RuleEngine(self.config.categories)
-            self.extractor = FieldExtractor(self.config)
+            self.extractor = FieldExtractor(
+                self.config,
+                llm_client=_build_llm_client(self.config, self.allow_network),
+            )
             self.templates = TemplateEngine(self.config)
         snapshot = self.loader.snapshot(self.config) if self.loader else self.config.to_json()
         batch = Batch(

@@ -1,13 +1,17 @@
 """图片 OCR 适配器与可替换后端。
 
-- ``TextLayerOcrAdapter``：无 OCR 引擎时的降级后端，返回空字段（字段标 need_human）；
+- ``DeepSeekOcrAdapter``：内网 DeepSeek-OCR-2，默认后端，无需 Key、直连；
+- ``TextLayerOcrAdapter``：无 OCR 引擎时的降级后端（字段标 need_human）；
 - ``TesseractOcrAdapter``：pytesseract 后端（需本机 tesseract 可执行文件）；
 - ``UmiOcrAdapter``：本机 HTTP 占位适配器（离线环回，无需额外依赖）；
 - ``ImageOcrAdapter``：受限子进程执行 OCR，超时 terminate，有限重试，绝不崩溃。
+
+子进程只接收后端名称与可 pickle 的配置字典，避免在 spawn 模式下传递闭包/适配器对象。
 """
 from __future__ import annotations
 
 import multiprocessing
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -18,9 +22,30 @@ from invoice_organizer.parsers.base import (
     ParserAdapter,
     RawTextField,
 )
+from invoice_organizer.parsers.deepseek_ocr import (
+    DEFAULT_ENDPOINT as DEFAULT_OCR_ENDPOINT,
+    DEFAULT_MODEL as DEFAULT_OCR_MODEL,
+    DeepSeekOcrAdapter,
+)
 
 _IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
 _IMAGE_MAGIC = (b"\xff\xd8\xff", b"\x89PNG", b"BM", b"II*\x00", b"MM\x00*")
+
+
+def _ocr_settings(config: Any | None) -> dict[str, Any]:
+    """把 OcrConfig 实例或字典归一为普通配置字典。"""
+    if config is None:
+        return {}
+    if isinstance(config, dict):
+        return dict(config)
+    if hasattr(config, "__dataclass_fields__"):
+        return asdict(config)
+    result: dict[str, Any] = {}
+    for key in ("provider", "endpoint", "model", "apiKey", "timeoutSec"):
+        value = getattr(config, key, None)
+        if value is not None:
+            result[key] = value
+    return result
 
 
 # ------------------------------------------------------------------ 后端
@@ -118,11 +143,21 @@ class UmiOcrAdapter:
 
 
 # ------------------------------------------------------------ 子进程 worker
-def _ocr_worker(path: str, backend_name: str, queue: Any) -> None:
-    """子进程入口：执行 OCR 并把结果（字典列表）放入队列。"""
+def _ocr_worker(path: str, backend_name: str, queue: Any,
+                backend_config: dict[str, Any] | None = None) -> None:
+    """子进程入口：按后端名称构造适配器，执行 OCR 并把字段字典放入队列。"""
     try:
-        if backend_name == "tesseract":
-            backend: Any = TesseractOcrAdapter()
+        settings = _ocr_settings(backend_config)
+        if backend_name == "deepseek_ocr":
+            backend: Any = DeepSeekOcrAdapter(
+                endpoint=settings.get("endpoint") or DEFAULT_OCR_ENDPOINT,
+                model=settings.get("model") or DEFAULT_OCR_MODEL,
+                timeoutSec=settings.get("timeoutSec") or 60,
+            )
+        elif backend_name == "tesseract":
+            backend = TesseractOcrAdapter()
+        elif backend_name == "umi_ocr":
+            backend = UmiOcrAdapter(endpoint=settings.get("endpoint") or "http://127.0.0.1:1224/api/ocr")
         else:
             backend = TextLayerOcrAdapter()
         fields = backend.recognize(path)
@@ -150,22 +185,37 @@ def _fields_from_dicts(items: list[dict[str, Any]]) -> list[RawTextField]:
 class ImageOcrAdapter(ParserAdapter):
     """图片 OCR 适配器：受限子进程 + 超时终止 + 有限重试。"""
 
-    def __init__(self, backend: Any | None = None) -> None:
+    def __init__(self, backend: Any | None = None, ocr_config: Any | None = None) -> None:
         """初始化。
 
         Args:
-            backend: OCR 后端；None 时按可用性自动选择 tesseract，否则降级 text-layer。
+            backend: 显式指定 OCR 后端；None 时按配置自动选择。
+            ocr_config: OcrConfig 实例或字典，传给子进程重建后端。
         """
-        self.backend = backend if backend is not None else self._default_backend()
+        self.ocr_config = _ocr_settings(ocr_config)
+        self.backend = backend if backend is not None else self._default_backend(self.ocr_config)
 
     @staticmethod
-    def _default_backend() -> Any:
-        """按可用性选择默认后端。"""
+    def _default_backend(ocr_config: Any | None = None) -> Any:
+        """按配置选择默认后端：优先 DeepSeek-OCR，失败/未配置再降级。"""
+        settings = _ocr_settings(ocr_config)
+        provider = str(settings.get("provider") or "deepseek_ocr")
+        if provider == "text_layer":
+            return TextLayerOcrAdapter()
+        if provider == "deepseek_ocr":
+            endpoint = str(settings.get("endpoint") or DEFAULT_OCR_ENDPOINT)
+            model = str(settings.get("model") or DEFAULT_OCR_MODEL)
+            if endpoint:
+                return DeepSeekOcrAdapter(
+                    endpoint=endpoint, model=model,
+                    timeoutSec=settings.get("timeoutSec") or 60,
+                )
+        # provider=tesseract 或 DeepSeek 未配置端点：尝试本机引擎，否则纯文本降级
         try:
             import pytesseract  # noqa: F401
-            return TesseractOcrAdapter()
         except ImportError:
             return TextLayerOcrAdapter()
+        return TesseractOcrAdapter()
 
     @property
     def name(self) -> str:
@@ -178,8 +228,17 @@ class ImageOcrAdapter(ParserAdapter):
             return True
         return any(header.startswith(magic) for magic in _IMAGE_MAGIC)
 
+    @staticmethod
+    def _tesseract_available() -> bool:
+        """本机是否安装 pytesseract（仅用于 DeepSeek 失败后的降级判断）。"""
+        try:
+            import pytesseract  # noqa: F401
+            return True
+        except ImportError:
+            return False
+
     def parse(self, path: str, ctx: ParseContext) -> ParseResult:
-        """解析图片；优先受限子进程，失败/超时则降级。"""
+        """解析图片；优先受限子进程，DeepSeek 无结果时再试 tesseract。"""
         result = ParseResult(
             sourceHash=ctx.fileHash, sourcePath=path, pageCount=1, adapterName=self.name
         )
@@ -201,26 +260,46 @@ class ImageOcrAdapter(ParserAdapter):
                 break
             result.fields = fields
             return result
+
+        if isinstance(self.backend, DeepSeekOcrAdapter) and self._tesseract_available():
+            result.warnings.append("DeepSeek OCR 未产出结果，尝试 tesseract 降级")
+            fields, error = self.parse_in_subprocess(path, ctx, backend_name="tesseract")
+            if not error and fields:
+                result.fields = fields
+                return result
         result.warnings.append(
             f"E402 {ERROR_CODES['E402']}: OCR 不可用，字段降级为待人工确认"
         )
         return result
 
-    def parse_in_subprocess(self, path: str, ctx: ParseContext
+    def parse_in_subprocess(self, path: str, ctx: ParseContext,
+                            backend_name: str | None = None
                             ) -> tuple[list[RawTextField], str]:
         """在受限子进程中执行 OCR，超时 terminate。
+
+        Args:
+            path: 图片路径。
+            ctx: 解析上下文（超时/重试）。
+            backend_name: 可选的后端覆盖名（用于降级重试）。
 
         Returns:
             (字段列表, 错误信息)；错误信息为空表示成功，``"timeout"`` 表示超时。
         """
         ctx_queue: Any = multiprocessing.Queue()
-        backend_name = getattr(self.backend, "name", "text_layer")
+        name = backend_name or getattr(self.backend, "name", "text_layer")
         process = multiprocessing.Process(
-            target=_ocr_worker, args=(path, backend_name, ctx_queue), daemon=True
+            target=_ocr_worker, args=(path, name, ctx_queue, self.ocr_config), daemon=True
         )
+        # 网络型后端（HTTP OCR）的子进程需覆盖其 HTTP 超时，否则会出现
+        # "HTTP 超时 60s 但子进程 20s 就被 terminate" 的误杀。留 5s 缓冲给序列化。
+        effective_timeout = max(1, int(ctx.timeoutSec or 20))
+        if name in ("deepseek_ocr", "umi_ocr"):
+            http_timeout = int(self.ocr_config.get("timeoutSec") or 0)
+            if http_timeout > 0:
+                effective_timeout = max(effective_timeout, http_timeout + 5)
         try:
             process.start()
-            process.join(timeout=max(1, int(ctx.timeoutSec or 20)))
+            process.join(timeout=effective_timeout)
             if process.is_alive():
                 process.terminate()
                 process.join(timeout=2)
@@ -249,4 +328,5 @@ __all__ = [
     "TextLayerOcrAdapter",
     "TesseractOcrAdapter",
     "UmiOcrAdapter",
+    "DeepSeekOcrAdapter",
 ]

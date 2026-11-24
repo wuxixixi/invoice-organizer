@@ -66,5 +66,20 @@
     "dedupe": true,
     "ocrRetry": 2,
     "ocrTimeoutSec": 20
+  },
+  "ocr": {
+    "provider": "deepseek_ocr",
+    "endpoint": "http://172.19.1.2:30080/v1/chat/completions",
+    "model": "default",
+    "apiKey": "",
+    "timeoutSec": 60
+  },
+  "llm": {
+    "enabled": true,
+    "endpoint": "http://172.19.1.10:8080/api/v1/chat/completions",
+    "model": "DeepSeek-V4-Flash-0731",
+    "apiKey": "",
+    "timeoutSec": 60,
+    "prompt": "从发票文本中提取 invoiceNo、issueDate、buyerName、buyerTaxId、sellerName、sellerTaxId、itemName、amountCent 八个字段，仅输出 JSON 对象，键为英文键名，值为字符串，无法确定则输出空字符串。"
   }
 }

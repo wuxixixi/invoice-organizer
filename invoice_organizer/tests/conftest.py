@@ -15,6 +15,18 @@ from invoice_organizer.config.schema import ProfileConfig
 from invoice_organizer.storage.db import Database
 
 
+@pytest.fixture(autouse=True)
+def no_real_llm_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    """双保险：任何测试都不得构造真实 LlmClient（含 start() 重载路径）。
+
+    专用 mock 用例直接构造 LlmClient / 注入桩客户端，不受此 fixture 影响。
+    """
+    monkeypatch.setattr(
+        "invoice_organizer.core.engine._build_llm_client",
+        lambda *_args, **_kwargs: None,
+    )
+
+
 @pytest.fixture
 def tmp_watch(tmp_path: Path) -> Path:
     """临时输入（投放）目录。"""
@@ -55,6 +67,8 @@ def config(tmp_watch: Path, tmp_archive: Path, tmp_quarantine: Path) -> ProfileC
     cfg.output.archiveRoot = str(tmp_archive)
     cfg.output.quarantine = str(tmp_quarantine)
     cfg.execution.previewRequired = True
+    # 测试环境严禁访问内网大模型服务；结构化补全由专用 mock 用例覆盖。
+    cfg.llm.enabled = False
     return cfg
 
 

@@ -105,6 +105,33 @@ class ExecutionConfig:
 
 
 @dataclass
+class OcrConfig:
+    """图片 OCR（DeepSeek-OCR-2）配置；服务无需 Key，apiKey 恒为空。"""
+
+    provider: str = "deepseek_ocr"
+    endpoint: str = "http://172.19.1.2:30080/v1/chat/completions"
+    model: str = "default"
+    apiKey: str = ""
+    timeoutSec: int = 60
+
+
+@dataclass
+class LlmConfig:
+    """大模型字段结构化配置；apiKey 运行时由环境变量/本地密钥文件注入。"""
+
+    enabled: bool = True
+    endpoint: str = "http://172.19.1.10:8080/api/v1/chat/completions"
+    model: str = "DeepSeek-V4-Flash-0731"
+    apiKey: str = ""
+    timeoutSec: int = 60
+    prompt: str = (
+        "从发票文本中提取 invoiceNo、issueDate、buyerName、buyerTaxId、"
+        "sellerName、sellerTaxId、itemName、amountCent 八个字段，"
+        "仅输出 JSON 对象，键为英文键名，值为字符串，无法确定则输出空字符串。"
+    )
+
+
+@dataclass
 class ProfileConfig:
     """一个命名档案的完整配置；每次保存 version 递增，历史不删。"""
 
@@ -121,6 +148,8 @@ class ProfileConfig:
     filenameTemplate: str = "{issueDate}_{sellerName}_{amountCent}_{invoiceNo}"
     export: ExportConfig = field(default_factory=ExportConfig)
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
+    ocr: OcrConfig = field(default_factory=OcrConfig)
+    llm: LlmConfig = field(default_factory=LlmConfig)
 
     # ------------------------------------------------------------------ 校验
     def validate(self) -> list[str]:
@@ -166,6 +195,22 @@ class ProfileConfig:
             errors.append("E701: maxSettleWait 不得为负")
         if self.execution.ocrRetry < 0 or self.execution.ocrTimeoutSec < 1:
             errors.append("E701: ocrRetry/ocrTimeoutSec 取值非法")
+
+        # OCR / 大模型服务配置：端点与模型必填，超时必须为正数
+        if not self.ocr.endpoint or not self.ocr.endpoint.strip():
+            errors.append("E701: ocr.endpoint 不得为空")
+        if not self.ocr.model or not self.ocr.model.strip():
+            errors.append("E701: ocr.model 不得为空")
+        if self.ocr.timeoutSec <= 0:
+            errors.append("E701: ocr.timeoutSec 必须大于 0")
+        if not self.llm.endpoint or not self.llm.endpoint.strip():
+            errors.append("E701: llm.endpoint 不得为空")
+        if not self.llm.model or not self.llm.model.strip():
+            errors.append("E701: llm.model 不得为空")
+        if self.llm.timeoutSec <= 0:
+            errors.append("E701: llm.timeoutSec 必须大于 0")
+        if not self.llm.prompt or not self.llm.prompt.strip():
+            errors.append("E701: llm.prompt 不得为空")
 
         # 模板占位符合法性
         for name, tpl in (
@@ -235,8 +280,16 @@ class ProfileConfig:
         return cls()
 
     def to_dict(self) -> dict[str, Any]:
-        """转换为普通字典（键名与 JSON 一致）。"""
-        return asdict(self)
+        """转换为普通字典（键名与 JSON 一致）。
+
+        安全约束：密钥绝不进入配置快照、持久化文件或导出结果。
+        运行时注入的 ``ocr.apiKey`` / ``llm.apiKey`` 在此统一置空；
+        密钥仅从环境变量或 gitignore 的本地密钥文件注入内存。
+        """
+        payload = asdict(self)
+        payload.setdefault("ocr", {})["apiKey"] = ""
+        payload.setdefault("llm", {})["apiKey"] = ""
+        return payload
 
     def to_json(self) -> str:
         """序列化为格式化 JSON 字符串（UTF-8，保留中文）。"""
@@ -247,14 +300,19 @@ class ProfileConfig:
         """从字典构造，缺失字段使用 dataclass 默认值，忽略未知键。"""
         data = dict(data or {})
         nested: dict[str, Any] = {}
-        for key, nested_cls in (
+        nested_specs = (
             ("watch", WatchConfig),
             ("output", OutputConfig),
             ("export", ExportConfig),
             ("execution", ExecutionConfig),
-        ):
+            ("ocr", OcrConfig),
+            ("llm", LlmConfig),
+        )
+        for key, nested_cls in nested_specs:
             raw = data.get(key)
-            nested[key] = nested_cls(**raw) if isinstance(raw, dict) else nested_cls()
+            allowed = {f.name for f in dataclass_fields(nested_cls)}
+            clean = {k: v for k, v in raw.items() if k in allowed} if isinstance(raw, dict) else {}
+            nested[key] = nested_cls(**clean)
         raw_categories = data.get("categories") or []
         categories: list[CategoryRule] = []
         for item in raw_categories:
@@ -270,7 +328,7 @@ class ProfileConfig:
             ))
         kwargs: dict[str, Any] = {
             k: v for k, v in data.items()
-            if k not in ("watch", "output", "export", "execution", "categories")
+            if k not in ("watch", "output", "export", "execution", "ocr", "llm", "categories")
         }
         kwargs.update(nested)
         kwargs["categories"] = categories
@@ -290,5 +348,7 @@ __all__ = [
     "CategoryRule",
     "ExportConfig",
     "ExecutionConfig",
+    "OcrConfig",
+    "LlmConfig",
     "ProfileConfig",
 ]

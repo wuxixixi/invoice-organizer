@@ -10,6 +10,7 @@ from typing import Any
 
 from invoice_organizer.ui.bridge import JsBridge
 from invoice_organizer.utils.logging import get_logger
+from invoice_organizer.utils.paths import resource_path
 
 
 class AppWindow:
@@ -51,7 +52,7 @@ class AppWindow:
 
     def start(self) -> None:
         """创建并启动窗口（阻塞直到窗口关闭）。"""
-        html_path = Path(__file__).with_name("index.html")
+        html_path = resource_path("invoice_organizer/ui/index.html")
         self._window = self.webview.create_window(
             self.title, html_path.as_uri(),
             width=1180, height=780, min_size=(960, 640),

@@ -14,8 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from invoice_organizer.config.schema import ProfileConfig
-
-_DEFAULT_JSON = Path(__file__).with_name("default.json")
+from invoice_organizer.utils.paths import resource_path
 
 
 class ProfileLoader:
@@ -51,7 +50,9 @@ class ProfileLoader:
     def default_config() -> ProfileConfig:
         """从包内 default.json 读取默认配置；文件缺失时退回 dataclass 默认。"""
         try:
-            return ProfileConfig.from_json(_DEFAULT_JSON.read_text(encoding="utf-8"))
+            return ProfileConfig.from_json(
+                resource_path("invoice_organizer/config/default.json").read_text(encoding="utf-8")
+            )
         except (OSError, ValueError, json.JSONDecodeError):
             return ProfileConfig.default()
 

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 from invoice_organizer import ERROR_CODES
 from invoice_organizer.parsers.base import ParseContext, ParseResult, ParserAdapter
@@ -14,17 +14,19 @@ from invoice_organizer.parsers.pdf_text import PdfTextAdapter
 class ParserRegistry:
     """解析器注册表（可插拔，新增票种不改核心）。"""
 
-    def __init__(self, adapters: Iterable[ParserAdapter] | None = None) -> None:
+    def __init__(self, adapters: Iterable[ParserAdapter] | None = None,
+                 ocr_config: Any | None = None) -> None:
         """初始化注册表。
 
         Args:
             adapters: 适配器列表；None 时注册内置三适配器（PDF/OFD/图片）。
+            ocr_config: OCR 配置（OcrConfig 实例或字典），传给图片 OCR 适配器。
         """
         self.adapters: list[ParserAdapter] = []
         if adapters is None:
             self.register(PdfTextAdapter())
             self.register(OfdXmlAdapter())
-            self.register(ImageOcrAdapter())
+            self.register(ImageOcrAdapter(ocr_config=ocr_config))
         else:
             for adapter in adapters:
                 self.register(adapter)

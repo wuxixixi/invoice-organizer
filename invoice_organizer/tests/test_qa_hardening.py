@@ -228,6 +228,7 @@ def qa_engine(tmp_path: Path, config: ProfileConfig) -> OrganizeEngine:
     return OrganizeEngine(
         config=config, db=db, loader=ProfileLoader(tmp_path / "data"),
         data_dir=tmp_path / "data",
+        allow_network=False,  # start() 重载磁盘配置后也不得真实访问内网 LLM
     )
 
 

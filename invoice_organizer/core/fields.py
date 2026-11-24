@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from typing import Sequence
+from typing import Any, Sequence
 
 from invoice_organizer import (
     AMOUNT_SOURCE_EXCL_TAX,
@@ -57,13 +57,16 @@ _LABEL_HINTS: dict[str, tuple[str, ...]] = {
 class FieldExtractor:
     """从 ParseResult 提取八字段并标注证据与置信。"""
 
-    def __init__(self, config: ProfileConfig | None = None) -> None:
+    def __init__(self, config: ProfileConfig | None = None,
+                 llm_client: Any | None = None) -> None:
         """初始化。
 
         Args:
-            config: 配置（用于 amountSource）；None 时默认不含税。
+            config: 配置（用于 amountSource 与 llm.enabled）；None 时默认不含税。
+            llm_client: 可选大模型结构化客户端；仅补全缺失/低置信字段。
         """
         self.config = config
+        self.llm_client = llm_client
 
     def extract(self, result: ParseResult, amountSource: str = AMOUNT_SOURCE_EXCL_TAX) -> InvoiceRecord:
         """执行字段提取，返回 InvoiceRecord。
@@ -132,10 +135,72 @@ class FieldExtractor:
         # 行项目合并
         inv.merge_items(self._find_items(fields))
 
+        # 大模型结构化补全（仅缺失/低置信字段，永不覆盖 high 与已核验字段）
+        self._augment_with_llm(inv, result, source_name)
+
         # 按权威八字段顺序排列槽位（买卖方名称/税号须落在固定位置）
         order = {key: idx for idx, key in enumerate(FIELD_KEYS)}
         inv.fields.sort(key=lambda slot: order.get(slot.key, len(FIELD_KEYS)))
         return inv
+
+    # --------------------------------------------------------- 大模型补全
+    @staticmethod
+    def _normalize_llm_value(key: str, raw: str) -> str:
+        """校验并归一大模型给出的字段值；不合法返回空字符串（不臆造）。"""
+        value = str(raw or "").strip()
+        if not value:
+            return ""
+        if key == "issueDate":
+            return DateUtil.normalize(value)
+        if key == "amountCent":
+            cents = MoneyUtil.yuan_to_cent(value)
+            return MoneyUtil.cent_to_yuan(cents) if cents > 0 else ""
+        if key in ("buyerTaxId", "sellerTaxId"):
+            cleaned = re.sub(r"\s", "", value).upper()
+            return cleaned if FieldExtractor._is_valid_tax_id(cleaned) else ""
+        if key == "invoiceNo":
+            digits = re.sub(r"\D", "", value)
+            return digits if 8 <= len(digits) <= 20 else ""
+        return value
+
+    def _augment_with_llm(self, inv: InvoiceRecord, result: ParseResult,
+                          source_name: str) -> None:
+        """用大模型结果补全缺失/低置信字段，证据标 ``llm``、置信 low。"""
+        del source_name
+        client = self.llm_client
+        if client is None:
+            return
+        llm_config = getattr(self.config, "llm", None)
+        if llm_config is not None and not getattr(llm_config, "enabled", True):
+            return
+        try:
+            structured = client.structure_invoice(result.all_text)
+        except Exception as exc:  # noqa: BLE001 - 补全失败必须保留原结果
+            from invoice_organizer.utils.logging import get_logger
+            get_logger().warning("LLM 字段补全失败，保持原结果：%s: %s",
+                                 type(exc).__name__, exc)
+            return
+        if not isinstance(structured, dict) or not structured:
+            return
+        for key in FIELD_KEYS:
+            raw = structured.get(key, "")
+            if not raw:
+                continue
+            existing = inv.get_field(key)
+            if existing.verified or existing.confidence == Confidence.HIGH:
+                continue
+            value = self._normalize_llm_value(key, str(raw))
+            if not value:
+                continue
+            inv.set_field(key, FieldSlot(
+                key=key, value=value, confidence=Confidence.LOW,
+                evidence=Evidence(sourceFile="llm", rawText=str(raw)),
+            ))
+        # 同步冗余字段（与槽位保持一致，供去重/模板/导出使用）
+        inv.invoiceNo = inv.get_field("invoiceNo").value
+        inv.issueDate = inv.get_field("issueDate").value
+        amount_slot = inv.get_field("amountCent")
+        inv.amountCent = MoneyUtil.yuan_to_cent(amount_slot.value) if amount_slot.value else 0
 
     # ------------------------------------------------------- 通用槽位构造
     def _extract_slot(self, fields: Sequence[RawTextField], key: str, finder,
