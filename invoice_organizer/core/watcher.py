@@ -38,17 +38,21 @@ class StableFile:
 class FileWatcher:
     """目录监控器：事件驱动 + 轮询兜底。"""
 
-    def __init__(self, config: WatchConfig) -> None:
+    def __init__(self, config: WatchConfig,
+                 on_timeout: Callable[[str], None] | None = None) -> None:
         """初始化。
 
         Args:
             config: 监控配置（路径/递归/写稳秒数/最大等待）。
+            on_timeout: 写稳超时回调（可选，向后兼容），接收含 E101 的详情字符串，
+                用于上层落「待处理」记录；未注入时仅记录 warning。
         """
         self.config = config
         self.queue: Queue[StableFile] = Queue()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._callback: Callable[[StableFile], None] | None = None
+        self.on_timeout: Callable[[str], None] | None = on_timeout
         self._pending: dict[str, float] = {}  # path -> 首次检测时间
         self._is_windows = sys.platform.startswith("win")
         self._logger = get_logger()
@@ -150,14 +154,27 @@ class FileWatcher:
             if self._stop_event.is_set():
                 return
             started = self._pending[key]
-            # 写稳超时 → E101，移出 pending
+            # 写稳超时 → E101，移出 pending，并上报待处理
             if time.monotonic() - started > max_wait:
                 self._pending.pop(key, None)
                 self._logger.warning("%s: 写稳超时 %s", ERROR_CODES["E101"], key)
+                self._notify_timeout(key)
                 continue
             if self.is_settled(key):
                 self._pending.pop(key, None)
                 self._enqueue(key)
+
+    def _notify_timeout(self, path: str) -> None:
+        """写稳超时上报：调用可选回调，使上层可落一条「待处理」记录。
+
+        回调异常被隔离，绝不影响监控主循环；未注入回调时行为与原先一致。
+        """
+        if self.on_timeout is None:
+            return
+        try:
+            self.on_timeout(f"E101 {ERROR_CODES['E101']}: 写稳超时: {path}")
+        except Exception as exc:  # noqa: BLE001 - 回调异常不影响监控
+            self._logger.exception("写稳超时回调失败 %s：%s", path, exc)
 
     def is_settled(self, path: str) -> bool:
         """判断文件是否写稳：两轮采样一致 + 无共享写句柄。"""

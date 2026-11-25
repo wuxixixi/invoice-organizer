@@ -16,11 +16,13 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
+from invoice_organizer import ERROR_CODES
 from invoice_organizer.models.audit import AuditEvent
 from invoice_organizer.models.batch import Batch, BatchReport
 from invoice_organizer.models.invoice import FieldSlot, InvoiceRecord
 from invoice_organizer.models.plan import Conflict, Plan, PlanItem
 from invoice_organizer.storage.migrations import Migrations
+from invoice_organizer.utils.logging import get_logger
 
 
 def _new_id(prefix: str) -> str:
@@ -483,17 +485,24 @@ class Database:
 
     # --------------------------------------------------------------- audit
     def add_audit(self, event: AuditEvent) -> None:
-        """追加一条审计事件（append-only）。若审计写入失败将抛异常。"""
+        """追加一条审计事件（append-only）。若审计写入失败将记录 E801 并抛异常。"""
         conn = self.connect()
         if not event.id:
             event.id = _new_id("A")
-        conn.execute(
-            """INSERT INTO audit_events(id,ts,actor,role,action,object,result,detail)
-               VALUES(?,?,?,?,?,?,?,?)""",
-            (event.id, event.ts, event.actor, event.role.value, event.action.value,
-             event.object, event.result, event.detail),
-        )
-        conn.commit()
+        try:
+            conn.execute(
+                """INSERT INTO audit_events(id,ts,actor,role,action,object,result,detail)
+                   VALUES(?,?,?,?,?,?,?,?)""",
+                (event.id, event.ts, event.actor, event.role.value, event.action.value,
+                 event.object, event.result, event.detail),
+            )
+            conn.commit()
+        except Exception as exc:  # noqa: BLE001 - 审计失败必须可观测：记录 E801 后上抛
+            get_logger().error(
+                "E801 %s 审计写入失败：action=%s object=%s error=%s",
+                ERROR_CODES["E801"], event.action.value, event.object, exc,
+            )
+            raise
 
     def list_audit(self, limit: int = 200) -> list[dict[str, Any]]:
         """读取审计事件（只读，无删除）。"""

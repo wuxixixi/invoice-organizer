@@ -111,10 +111,14 @@ class Archiver:
                 result.errorCode = "E501"
                 return result
 
-            # 不覆盖重名
+            # 不覆盖重名：以 resolve_inside 返回的规范路径为唯一基准比较，
+            # 避免“规范绝对路径 vs 原始拼接串”基准不同导致每次都误报重名。
+            expected = dest_str
             dest_str = PathGuard.next_available(dest_str)
-            if dest_str != os.path.join(self.guard.archiveRoot, rel):
-                self._logger.info("目标重名，改用：%s", dest_str)
+            if dest_str != expected:
+                # 真实改名不是失败：只记录 E203 日志/审计，result.errorCode 保持为空
+                self._logger.info("E203 %s 目标重名，改用：%s",
+                                  ERROR_CODES["E203"], dest_str)
             dest = Path(dest_str)
             dest.parent.mkdir(parents=True, exist_ok=True)
 

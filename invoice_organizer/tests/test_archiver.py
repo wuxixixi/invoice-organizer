@@ -1,6 +1,7 @@
 """原子写入、不覆盖重名、哈希复核、回滚测试（tmp_path）。"""
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
@@ -84,3 +85,53 @@ def test_unconfirmed_plan_rejected(tmp_watch: Path, tmp_archive: Path) -> None:
     with pytest.raises(ValueError) as exc:
         Archiver(PathGuard(str(tmp_archive))).execute(plan)
     assert "E702" in str(exc.value)
+
+
+# ------------------------------------------------------- D1 重名日志假阳性回归
+@pytest.mark.parametrize("sep", ["/", "\\"])
+def test_no_false_duplicate_log_when_name_unchanged(
+    tmp_watch: Path, tmp_archive: Path, monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture, sep: str,
+) -> None:
+    """next_available 返回原规范路径时不得误报“目标重名”（覆盖两种分隔符）。"""
+    src = tmp_watch / "a.pdf"
+    src.write_bytes(b"%PDF no-false-positive")
+    # next_available 为静态方法：返回传入的规范路径，即“未改名”
+    monkeypatch.setattr(PathGuard, "next_available", staticmethod(lambda p: p))
+    item = PlanItem(invoiceId="InoDup", oldPath=str(src),
+                    newPath=f"2024{sep}公司{sep}a.pdf")
+
+    with caplog.at_level(logging.INFO, logger="invoice_organizer"):
+        results = Archiver(PathGuard(str(tmp_archive))).execute(_make_plan([item]))
+
+    assert results[0].verified is True
+    assert results[0].errorCode == ""  # 未改名不产生错误码
+    assert "目标重名" not in caplog.text
+    assert "E203" not in caplog.text
+
+
+@pytest.mark.parametrize("sep", ["/", "\\"])
+def test_real_duplicate_logs_e203_and_still_archives(
+    tmp_watch: Path, tmp_archive: Path, monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture, sep: str,
+) -> None:
+    """真实改名（追加 _2）时记录 E203，但归档仍成功、errorCode 为空。"""
+    src = tmp_watch / "a.pdf"
+    src.write_bytes(b"%PDF real-duplicate")
+
+    def renamed(p: str) -> str:
+        path = Path(p)
+        return str(path.with_name(f"{path.stem}_2{path.suffix}"))
+
+    monkeypatch.setattr(PathGuard, "next_available", staticmethod(renamed))
+    item = PlanItem(invoiceId="IrealDup", oldPath=str(src),
+                    newPath=f"2024{sep}公司{sep}a.pdf")
+
+    with caplog.at_level(logging.INFO, logger="invoice_organizer"):
+        results = Archiver(PathGuard(str(tmp_archive))).execute(_make_plan([item]))
+
+    assert results[0].verified is True
+    assert results[0].errorCode == ""  # 改名不是失败，不得跳过归档
+    assert Path(results[0].archivedPath).name == "a_2.pdf"
+    assert "目标重名" in caplog.text
+    assert "E203" in caplog.text

@@ -131,7 +131,9 @@ class OrganizeEngine:
         )
         self.rules = RuleEngine(config.categories)
         self.templates = TemplateEngine(config)
-        self.watcher = FileWatcher(config.watch)
+        # 写稳超时上报为「待处理」记录：batch_id 在 start() 时才生成，
+        # 故回调在调用时读取当前批次 ID（未启动批次时为空字符串）。
+        self.watcher = FileWatcher(config.watch, on_timeout=self._on_watch_timeout)
         self.guard = PathGuard(config.output.archiveRoot, config.output.quarantine)
         self.archiver = Archiver(self.guard, db)
         self.exporter = ExportEngine(config.export, self.data_dir / "exports")
@@ -286,6 +288,15 @@ class OrganizeEngine:
                     reason: str, detail: str = "") -> None:
         """追加待复核记录。"""
         self.db.add_review(batch_id, invoice_id, field_key, reason, detail)
+
+    def _on_watch_timeout(self, detail: str) -> None:
+        """写稳超时回调：落一条「待处理」待复核记录（此时尚无 invoice_id）。
+
+        Args:
+            detail: watcher 提供的含 E101 的超时详情。
+        """
+        batch_id = self._current_batch_id
+        self._add_review(batch_id, "", "file", "E101", detail)
 
     # ---------------------------------------------------------------- 计划
     def build_plan(self, batchId: str) -> Plan:
