@@ -25,7 +25,14 @@ a = Analysis(
     pathex=[str(root)],
     binaries=[],
     datas=ui_data + config_data,
-    hiddenimports=["webview", "pdfplumber", "openpyxl"],
+    hiddenimports=[
+        "webview",        # pywebview 桌面壳（导入名 webview）
+        "pdfplumber",     # PDF 文本层解析（pdf_text.py 内延迟导入）
+        "openpyxl",       # Excel 台账导出（exporter.py 内延迟导入）
+        "PIL",            # Pillow 图片预处理（image_ocr.py 内延迟导入）
+        "pytesseract",    # Tesseract OCR 兜底（image_ocr.py 内延迟导入）
+        "watchdog",       # 目录事件监控（watcher.py 内延迟导入）
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

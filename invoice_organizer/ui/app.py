@@ -56,7 +56,7 @@ class AppWindow:
         self._window = self.webview.create_window(
             self.title, html_path.as_uri(),
             width=1180, height=780, min_size=(960, 640),
-            resizable=True, debug=False,
+            resizable=True,
         )
         self._inject_api()
         try:
@@ -64,7 +64,8 @@ class AppWindow:
         except Exception:  # noqa: BLE001 - 不同版本事件接口差异
             pass
         self._logger.info("桌面窗口启动：%s", html_path)
-        self.webview.start()
+        # debug 属于 webview.start() 参数，而非 create_window()（pywebview 5.x API）
+        self.webview.start(debug=False)
 
     def on_closed(self) -> None:
         """窗口关闭回调：停止监控。"""
