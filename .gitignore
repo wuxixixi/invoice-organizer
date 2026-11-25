@@ -15,6 +15,8 @@ data/
 archive/
 quarantine/
 exports/
+# 本地生成的交付/中间产物目录（正式交付文档见 deliverables/）
+output/
 *.db
 *.log
 
